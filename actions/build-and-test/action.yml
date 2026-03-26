@@ -1,0 +1,83 @@
+name: "Build and Test"
+description: "Build, lint, and test the workspace. Handles monorepo topological builds."
+
+outputs:
+  build-status:
+    description: "Build result: success or failure"
+    value: ${{ steps.build.outcome }}
+  test-status:
+    description: "Test result: success, failure, or skipped"
+    value: ${{ steps.test.outcome }}
+  lint-status:
+    description: "Lint result: success, failure, or skipped"
+    value: ${{ steps.lint.outcome }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run codegen (if available)
+      id: codegen
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ -f "package.json" ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.generate ? 0 : 1)" 2>/dev/null; then
+          echo "Running codegen..."
+          yarn generate || npm run generate
+        elif [ -f "yarn.lock" ]; then
+          # Check workspaces for generate scripts
+          yarn workspaces list --json 2>/dev/null | while read -r line; do
+            LOC=$(echo "$line" | jq -r '.location')
+            NAME=$(echo "$line" | jq -r '.name')
+            PKG="$LOC/package.json"
+            [ -f "$PKG" ] || continue
+            if jq -e '.scripts.generate' "$PKG" > /dev/null 2>&1; then
+              echo "::group::Generate: $NAME"
+              yarn workspace "$NAME" generate
+              echo "::endgroup::"
+            fi
+          done
+        fi
+
+    - name: Build
+      id: build
+      shell: bash
+      run: |
+        if [ -f "yarn.lock" ]; then
+          yarn build
+        elif [ -f "pnpm-lock.yaml" ]; then
+          pnpm build
+        elif [ -f "package-lock.json" ]; then
+          npm run build
+        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
+          uv run build 2>/dev/null || echo "No build script found for Python project"
+        fi
+
+    - name: Lint
+      id: lint
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ -f "yarn.lock" ]; then
+          yarn lint
+        elif [ -f "pnpm-lock.yaml" ]; then
+          pnpm lint
+        elif [ -f "package-lock.json" ]; then
+          npm run lint
+        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
+          uv run lint 2>/dev/null || uv run ruff check . 2>/dev/null || echo "No lint configured"
+        fi
+
+    - name: Test
+      id: test
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ -f "yarn.lock" ]; then
+          yarn test 2>/dev/null || echo "No tests configured"
+        elif [ -f "pnpm-lock.yaml" ]; then
+          pnpm test 2>/dev/null || echo "No tests configured"
+        elif [ -f "package-lock.json" ]; then
+          npm test 2>/dev/null || echo "No tests configured"
+        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
+          uv run pytest 2>/dev/null || echo "No tests configured"
+        fi

@@ -1,0 +1,87 @@
+name: "Setup Workspace"
+description: "Detect workspace type, setup toolchain, configure caches, and authenticate CodeArtifact"
+
+inputs:
+  codeartifact-domain:
+    description: "CodeArtifact domain name"
+    default: "dev-center"
+  codeartifact-domain-owner:
+    description: "AWS account ID owning the CodeArtifact domain"
+    default: "572953113830"
+  aws-region:
+    description: "AWS region"
+    default: "us-east-1"
+
+outputs:
+  workspace-type:
+    description: "Detected workspace type: yarn, uv, npm, or pnpm"
+    value: ${{ steps.detect.outputs.type }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Detect workspace type
+      id: detect
+      shell: bash
+      run: |
+        if [ -f "yarn.lock" ]; then
+          echo "type=yarn" >> $GITHUB_OUTPUT
+        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
+          echo "type=uv" >> $GITHUB_OUTPUT
+        elif [ -f "pnpm-lock.yaml" ]; then
+          echo "type=pnpm" >> $GITHUB_OUTPUT
+        elif [ -f "package-lock.json" ]; then
+          echo "type=npm" >> $GITHUB_OUTPUT
+        else
+          echo "type=unknown" >> $GITHUB_OUTPUT
+        fi
+        echo "Detected workspace type: $(cat $GITHUB_OUTPUT | grep type | cut -d= -f2)"
+
+    - name: Setup Node.js (JS workspaces)
+      if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'npm' || steps.detect.outputs.type == 'pnpm'
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Enable Corepack (Yarn/pnpm)
+      if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'pnpm'
+      shell: bash
+      run: corepack enable
+
+    - name: Setup Python + UV (Python workspaces)
+      if: steps.detect.outputs.type == 'uv'
+      shell: bash
+      run: |
+        python3 --version || echo "Python not found — install via setup-python action"
+        uv --version || echo "UV not found"
+
+    - name: CodeArtifact auth
+      shell: bash
+      continue-on-error: true
+      run: |
+        if ! command -v aws &> /dev/null; then
+          echo "AWS CLI not available — skipping CodeArtifact auth"
+          exit 0
+        fi
+        CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+          --domain ${{ inputs.codeartifact-domain }} \
+          --domain-owner ${{ inputs.codeartifact-domain-owner }} \
+          --region ${{ inputs.aws-region }} \
+          --query authorizationToken --output text 2>/dev/null) || true
+        if [ -n "$CODEARTIFACT_AUTH_TOKEN" ]; then
+          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+          echo "CodeArtifact authenticated"
+        else
+          echo "CodeArtifact auth skipped (no credentials or permission)"
+        fi
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        case "${{ steps.detect.outputs.type }}" in
+          yarn)  yarn install --immutable ;;
+          npm)   npm ci ;;
+          pnpm)  pnpm install --frozen-lockfile ;;
+          uv)    uv sync ;;
+          *)     echo "Unknown workspace type — skipping install" ;;
+        esac

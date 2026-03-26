@@ -1,0 +1,82 @@
+name: CI Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to build"
+        required: true
+        type: string
+      ref:
+        description: "Branch or SHA to checkout"
+        required: true
+        type: string
+      check_run_id:
+        description: "GitHub check run ID to update on completion"
+        type: string
+      pr_number:
+        description: "PR number (if applicable)"
+        type: string
+      devcenter_repository_id:
+        description: "Dev Center repository ID for result recording"
+        type: string
+      publish:
+        description: "Whether to publish services (true on main branch merges)"
+        type: string
+        default: "false"
+
+  # Allow repos to call this as a reusable workflow
+  workflow_call:
+    inputs:
+      target_repo:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+      check_run_id:
+        type: string
+      pr_number:
+        type: string
+      devcenter_repository_id:
+        type: string
+      publish:
+        type: string
+        default: "false"
+
+env:
+  AWS_REGION: us-east-1
+  CODEARTIFACT_DOMAIN: dev-center
+  CODEARTIFACT_DOMAIN_OWNER: "572953113830"
+  ECR_REGISTRY: 572953113830.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  ci:
+    runs-on: riven-runner
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          ref: ${{ inputs.ref }}
+
+      - uses: riven-private/github-actions/actions/setup-workspace@main
+        with:
+          codeartifact-domain: ${{ env.CODEARTIFACT_DOMAIN }}
+          codeartifact-domain-owner: ${{ env.CODEARTIFACT_DOMAIN_OWNER }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: riven-private/github-actions/actions/build-and-test@main
+
+      - uses: riven-private/github-actions/actions/publish-services@main
+        if: inputs.publish == 'true'
+        with:
+          ecr-registry: ${{ env.ECR_REGISTRY }}
+
+      - uses: riven-private/github-actions/actions/report-results@main
+        if: always()
+        with:
+          devcenter-url: http://dev-center-service.dev-center.svc.cluster.local:8080
+          repository-id: ${{ inputs.devcenter_repository_id }}
+          check-run-id: ${{ inputs.check_run_id }}
+          status: ${{ job.status }}

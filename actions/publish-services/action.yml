@@ -1,0 +1,89 @@
+name: "Publish Services"
+description: "Discover riven.service packages, build Docker images, and push to ECR"
+
+inputs:
+  ecr-registry:
+    description: "ECR registry URL (e.g., 572953113830.dkr.ecr.us-east-1.amazonaws.com)"
+    required: true
+
+outputs:
+  published:
+    description: "JSON array of published services with tags"
+    value: ${{ steps.publish.outputs.published }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Discover services
+      id: discover
+      shell: bash
+      run: |
+        SERVICES="[]"
+        if [ -f "yarn.lock" ]; then
+          SERVICES=$(yarn workspaces list --json 2>/dev/null | while read -r line; do
+            LOC=$(echo "$line" | jq -r '.location')
+            NAME=$(echo "$line" | jq -r '.name')
+            PKG="$LOC/package.json"
+            [ -f "$PKG" ] || continue
+            IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
+            if [ "$IS_SERVICE" = "true" ]; then
+              ECR=$(jq -r '.riven.ecr' "$PKG")
+              VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
+              if [ -f "$LOC/Dockerfile" ]; then
+                DOCKERFILE="$LOC/Dockerfile"
+              else
+                DOCKERFILE="Dockerfile"
+              fi
+              echo "{\"name\":\"$NAME\",\"dir\":\"$LOC\",\"ecr\":\"$ECR\",\"version\":\"$VERSION\",\"dockerfile\":\"$DOCKERFILE\"}"
+            fi
+          done | jq -sc '.')
+        fi
+        echo "services=$SERVICES" >> $GITHUB_OUTPUT
+        echo "Found $(echo "$SERVICES" | jq length) services to publish"
+
+    - name: ECR login
+      if: steps.discover.outputs.services != '[]' && steps.discover.outputs.services != 'null'
+      shell: bash
+      continue-on-error: true
+      run: |
+        if command -v aws &> /dev/null; then
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ inputs.ecr-registry }} 2>/dev/null
+        else
+          echo "AWS CLI not available — skipping ECR login"
+        fi
+
+    - name: Build and push services
+      id: publish
+      shell: bash
+      run: |
+        SERVICES='${{ steps.discover.outputs.services }}'
+        SHA=$(git rev-parse --short HEAD)
+        PUBLISHED="[]"
+
+        echo "$SERVICES" | jq -c '.[]' 2>/dev/null | while read -r svc; do
+          NAME=$(echo "$svc" | jq -r '.name')
+          DIR=$(echo "$svc" | jq -r '.dir')
+          ECR=$(echo "$svc" | jq -r '.ecr')
+          VERSION=$(echo "$svc" | jq -r '.version')
+          DOCKERFILE=$(echo "$svc" | jq -r '.dockerfile')
+          TAG="${VERSION}-${SHA}"
+          IMAGE="${{ inputs.ecr-registry }}/${ECR}:${TAG}"
+
+          echo "::group::Publish $NAME → $IMAGE"
+
+          # Ensure ECR repo exists
+          aws ecr describe-repositories --repository-names "$ECR" 2>/dev/null \
+            || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true 2>/dev/null \
+            || echo "Could not create ECR repo (may need permissions)"
+
+          # Build and push
+          docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" . \
+            && docker push "$IMAGE" \
+            && docker push "${{ inputs.ecr-registry }}/${ECR}:latest" \
+            && echo "Published $NAME:$TAG" \
+            || echo "Failed to publish $NAME"
+
+          echo "::endgroup::"
+        done
+
+        echo "published=$PUBLISHED" >> $GITHUB_OUTPUT

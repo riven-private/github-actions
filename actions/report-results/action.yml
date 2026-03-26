@@ -1,0 +1,56 @@
+name: "Report Results"
+description: "Record CI results in dev-center-service via Connect RPC"
+
+inputs:
+  devcenter-url:
+    description: "Dev Center service URL"
+    default: "http://dev-center-service.dev-center.svc.cluster.local:8080"
+  repository-id:
+    description: "Dev Center repository ID"
+  check-run-id:
+    description: "GitHub check run ID to update"
+  status:
+    description: "Job status (success, failure, cancelled)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Report to Dev Center
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ -z "${{ inputs.devcenter-url }}" ] || [ -z "${{ inputs.repository-id }}" ]; then
+          echo "Dev Center URL or repository ID not provided — skipping result recording"
+          exit 0
+        fi
+
+        # Map GitHub job status to proto CiRunConclusion
+        case "${{ inputs.status }}" in
+          success)   CONCLUSION="CI_RUN_CONCLUSION_SUCCESS" ;;
+          failure)   CONCLUSION="CI_RUN_CONCLUSION_FAILURE" ;;
+          cancelled) CONCLUSION="CI_RUN_CONCLUSION_CANCELLED" ;;
+          *)         CONCLUSION="CI_RUN_CONCLUSION_UNSPECIFIED" ;;
+        esac
+
+        PAYLOAD=$(cat <<JSONEOF
+        {
+          "repositoryId": "${{ inputs.repository-id }}",
+          "commitSha": "${{ github.sha }}",
+          "checkName": "${{ github.workflow }}",
+          "status": "CI_RUN_STATUS_COMPLETED",
+          "conclusion": "$CONCLUSION",
+          "detailsUrl": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+          "branch": "${{ github.head_ref || github.ref_name }}",
+          "initiatedBy": "${{ github.triggering_actor }}",
+          "updatedBy": "ci-engine"
+        }
+        JSONEOF
+        )
+
+        curl -s -X POST \
+          "${{ inputs.devcenter-url }}/riven.github.v1.GitHubIntegrationService/RecordCiRunResult" \
+          -H "Content-Type: application/json" \
+          -d "$PAYLOAD" \
+          && echo "Result recorded in Dev Center" \
+          || echo "Failed to record result (non-fatal)"
