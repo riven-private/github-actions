@@ -96,22 +96,35 @@ runs:
         fi
         uv --version
 
-    - name: CodeArtifact auth
+    - name: Install AWS CLI (if missing)
       shell: bash
-      continue-on-error: true
       run: |
-        if ! command -v aws &> /dev/null; then
-          echo "AWS CLI not available — skipping CodeArtifact auth"
+        if command -v aws &> /dev/null; then
+          echo "AWS CLI already available: $(aws --version)"
           exit 0
         fi
+        echo "Installing AWS CLI..."
+        curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+        unzip -q /tmp/awscli.zip -d /tmp
+        sudo /tmp/aws/install --update 2>/dev/null || /tmp/aws/install --update --install-dir $HOME/.local/aws --bin-dir $HOME/.local/bin 2>/dev/null
+        rm -rf /tmp/awscli.zip /tmp/aws
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        aws --version
+
+    - name: CodeArtifact auth
+      shell: bash
+      run: |
         TOKEN=$(aws codeartifact get-authorization-token \
           --domain ${{ inputs.codeartifact-domain }} \
           --domain-owner ${{ inputs.codeartifact-domain-owner }} \
           --region ${{ inputs.aws-region }} \
-          --query authorizationToken --output text 2>/dev/null) || true
-        if [ -n "$TOKEN" ]; then
+          --query authorizationToken --output text 2>&1) || true
+        if [ -n "$TOKEN" ] && [[ ! "$TOKEN" == *"error"* ]] && [[ ! "$TOKEN" == *"Unable"* ]]; then
           echo "CODEARTIFACT_AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "::add-mask::$TOKEN"
           echo "CodeArtifact authenticated"
+        else
+          echo "::warning::CodeArtifact auth failed — private @riven-* packages may not resolve"
         fi
 
     - name: Install dependencies
