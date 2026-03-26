@@ -1,5 +1,5 @@
 name: "Setup Workspace"
-description: "Detect workspace type, setup toolchain, configure caches, and authenticate CodeArtifact"
+description: "Detect workspace type, setup toolchain, configure caches, install dependencies"
 
 inputs:
   codeartifact-domain:
@@ -11,49 +11,90 @@ inputs:
   aws-region:
     description: "AWS region"
     default: "us-east-1"
+  node-version:
+    description: "Node.js version override (auto-detected from .nvmrc/.node-version if not set)"
+    default: ""
 
 outputs:
   workspace-type:
-    description: "Detected workspace type: yarn, uv, npm, or pnpm"
+    description: "Detected workspace type: yarn, uv, npm, pnpm, go, or unknown"
     value: ${{ steps.detect.outputs.type }}
+  node-version:
+    description: "Resolved Node.js version"
+    value: ${{ steps.detect.outputs.node_version }}
+  has-services:
+    description: "Whether the workspace has deployable services"
+    value: ${{ steps.discover.outputs.has_services }}
+  services:
+    description: "JSON array of discovered services"
+    value: ${{ steps.discover.outputs.services }}
+  has-libraries:
+    description: "Whether the workspace has publishable libraries"
+    value: ${{ steps.discover.outputs.has_libraries }}
+  libraries:
+    description: "JSON array of discovered libraries"
+    value: ${{ steps.discover.outputs.libraries }}
 
 runs:
   using: "composite"
   steps:
-    - name: Detect workspace type
+    - name: Detect workspace type and toolchain
       id: detect
       shell: bash
       run: |
+        # Detect workspace type
         if [ -f "yarn.lock" ]; then
-          echo "type=yarn" >> $GITHUB_OUTPUT
-        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
-          echo "type=uv" >> $GITHUB_OUTPUT
+          TYPE="yarn"
+        elif [ -f "uv.lock" ] || ([ -f "pyproject.toml" ] && grep -q '\[tool\.uv' pyproject.toml 2>/dev/null); then
+          TYPE="uv"
+        elif [ -f "go.mod" ]; then
+          TYPE="go"
         elif [ -f "pnpm-lock.yaml" ]; then
-          echo "type=pnpm" >> $GITHUB_OUTPUT
+          TYPE="pnpm"
         elif [ -f "package-lock.json" ]; then
-          echo "type=npm" >> $GITHUB_OUTPUT
+          TYPE="npm"
+        elif [ -f "package.json" ]; then
+          TYPE="yarn"
         else
-          echo "type=unknown" >> $GITHUB_OUTPUT
+          TYPE="unknown"
         fi
-        echo "Detected workspace type: $(cat $GITHUB_OUTPUT | grep type | cut -d= -f2)"
+        echo "type=$TYPE" >> $GITHUB_OUTPUT
 
-    - name: Setup Node.js (JS workspaces)
+        # Detect Node.js version
+        NODE_VERSION="${{ inputs.node-version }}"
+        if [ -z "$NODE_VERSION" ]; then
+          if [ -f ".nvmrc" ]; then
+            NODE_VERSION=$(cat .nvmrc | tr -d 'v \n')
+          elif [ -f ".node-version" ]; then
+            NODE_VERSION=$(cat .node-version | tr -d 'v \n')
+          else
+            NODE_VERSION="22"
+          fi
+        fi
+        echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
+
+        echo "Detected: type=$TYPE, node=$NODE_VERSION"
+
+    - name: Setup Node.js
       if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'npm' || steps.detect.outputs.type == 'pnpm'
       uses: actions/setup-node@v4
       with:
-        node-version: "22"
+        node-version: ${{ steps.detect.outputs.node_version }}
 
-    - name: Enable Corepack (Yarn/pnpm)
+    - name: Enable Corepack
       if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'pnpm'
       shell: bash
       run: corepack enable
 
-    - name: Setup Python + UV (Python workspaces)
+    - name: Setup Python + UV
       if: steps.detect.outputs.type == 'uv'
       shell: bash
       run: |
-        python3 --version || echo "Python not found — install via setup-python action"
-        uv --version || echo "UV not found"
+        if ! command -v uv &> /dev/null; then
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        fi
+        uv --version
 
     - name: CodeArtifact auth
       shell: bash
@@ -63,16 +104,14 @@ runs:
           echo "AWS CLI not available — skipping CodeArtifact auth"
           exit 0
         fi
-        CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+        TOKEN=$(aws codeartifact get-authorization-token \
           --domain ${{ inputs.codeartifact-domain }} \
           --domain-owner ${{ inputs.codeartifact-domain-owner }} \
           --region ${{ inputs.aws-region }} \
           --query authorizationToken --output text 2>/dev/null) || true
-        if [ -n "$CODEARTIFACT_AUTH_TOKEN" ]; then
-          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+        if [ -n "$TOKEN" ]; then
+          echo "CODEARTIFACT_AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
           echo "CodeArtifact authenticated"
-        else
-          echo "CodeArtifact auth skipped (no credentials or permission)"
         fi
 
     - name: Install dependencies
@@ -82,6 +121,58 @@ runs:
           yarn)  yarn install --immutable ;;
           npm)   npm ci ;;
           pnpm)  pnpm install --frozen-lockfile ;;
-          uv)    uv sync ;;
+          uv)    uv sync --all-extras ;;
+          go)    go mod download ;;
           *)     echo "Unknown workspace type — skipping install" ;;
         esac
+
+    - name: Discover workspace members
+      id: discover
+      shell: bash
+      run: |
+        SERVICES="[]"
+        LIBRARIES="[]"
+
+        case "${{ steps.detect.outputs.type }}" in
+          yarn)
+            SERVICES=$(yarn workspaces list --json 2>/dev/null | while read -r line; do
+              LOC=$(echo "$line" | jq -r '.location')
+              NAME=$(echo "$line" | jq -r '.name')
+              PKG="$LOC/package.json"
+              [ -f "$PKG" ] || continue
+              IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
+              if [ "$IS_SERVICE" = "true" ]; then
+                ECR=$(jq -r '.riven.ecr // ""' "$PKG")
+                VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
+                DF="$LOC/Dockerfile"
+                [ -f "$DF" ] || DF="Dockerfile"
+                echo "{\"name\":\"$NAME\",\"dir\":\"$LOC\",\"ecr\":\"$ECR\",\"version\":\"$VERSION\",\"dockerfile\":\"$DF\"}"
+              fi
+            done | jq -sc '.' 2>/dev/null || echo '[]')
+
+            LIBRARIES=$(yarn workspaces list --json 2>/dev/null | while read -r line; do
+              LOC=$(echo "$line" | jq -r '.location')
+              NAME=$(echo "$line" | jq -r '.name')
+              PKG="$LOC/package.json"
+              [ -f "$PKG" ] || continue
+              IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
+              IS_PRIVATE=$(jq -r '.private // false' "$PKG")
+              if [ "$IS_SERVICE" != "true" ] && [ "$IS_PRIVATE" != "true" ] && [ "$LOC" != "." ]; then
+                VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
+                echo "{\"name\":\"$NAME\",\"dir\":\"$LOC\",\"version\":\"$VERSION\"}"
+              fi
+            done | jq -sc '.' 2>/dev/null || echo '[]')
+            ;;
+        esac
+
+        [ "$SERVICES" = "null" ] && SERVICES="[]"
+        [ "$LIBRARIES" = "null" ] && LIBRARIES="[]"
+
+        echo "services=$SERVICES" >> $GITHUB_OUTPUT
+        echo "libraries=$LIBRARIES" >> $GITHUB_OUTPUT
+
+        SVC_COUNT=$(echo "$SERVICES" | jq 'length')
+        LIB_COUNT=$(echo "$LIBRARIES" | jq 'length')
+        echo "has_services=$([ "$SVC_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+        echo "has_libraries=$([ "$LIB_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+        echo "Discovered $SVC_COUNT services, $LIB_COUNT libraries"

@@ -21,11 +21,10 @@ on:
         description: "Dev Center repository ID for result recording"
         type: string
       publish:
-        description: "Whether to publish services (true on main branch merges)"
+        description: "Whether to publish (true on main branch merges)"
         type: string
         default: "false"
 
-  # Allow repos to call this as a reusable workflow
   workflow_call:
     inputs:
       target_repo:
@@ -44,6 +43,10 @@ on:
         type: string
         default: "false"
 
+concurrency:
+  group: ci-${{ inputs.target_repo }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
 env:
   AWS_REGION: us-east-1
   CODEARTIFACT_DOMAIN: dev-center
@@ -61,6 +64,7 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - uses: riven-private/github-actions/actions/setup-workspace@main
+        id: setup
         with:
           codeartifact-domain: ${{ env.CODEARTIFACT_DOMAIN }}
           codeartifact-domain-owner: ${{ env.CODEARTIFACT_DOMAIN_OWNER }}
@@ -69,9 +73,12 @@ jobs:
       - uses: riven-private/github-actions/actions/build-and-test@main
 
       - uses: riven-private/github-actions/actions/publish-services@main
-        if: inputs.publish == 'true'
+        if: inputs.publish == 'true' && steps.setup.outputs.has-services == 'true'
         with:
           ecr-registry: ${{ env.ECR_REGISTRY }}
+
+      - uses: riven-private/github-actions/actions/publish-libraries@main
+        if: inputs.publish == 'true' && steps.setup.outputs.has-libraries == 'true'
 
       - uses: riven-private/github-actions/actions/report-results@main
         if: always()

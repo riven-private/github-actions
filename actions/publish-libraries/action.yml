@@ -1,0 +1,76 @@
+name: "Publish Libraries"
+description: "Publish workspace libraries to CodeArtifact (npm for JS, PyPI for Python)"
+
+inputs:
+  codeartifact-domain:
+    description: "CodeArtifact domain name"
+    default: "dev-center"
+  codeartifact-domain-owner:
+    description: "AWS account ID"
+    default: "572953113830"
+  npm-repository:
+    description: "CodeArtifact npm repository name"
+    default: "dev-center-npm"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure CodeArtifact npm registry
+      shell: bash
+      continue-on-error: true
+      run: |
+        if ! command -v aws &> /dev/null; then
+          echo "AWS CLI not available — skipping library publish"
+          exit 0
+        fi
+
+        ENDPOINT=$(aws codeartifact get-repository-endpoint \
+          --domain ${{ inputs.codeartifact-domain }} \
+          --domain-owner ${{ inputs.codeartifact-domain-owner }} \
+          --repository ${{ inputs.npm-repository }} \
+          --format npm \
+          --query repositoryEndpoint --output text 2>/dev/null) || true
+
+        TOKEN=$(aws codeartifact get-authorization-token \
+          --domain ${{ inputs.codeartifact-domain }} \
+          --domain-owner ${{ inputs.codeartifact-domain-owner }} \
+          --query authorizationToken --output text 2>/dev/null) || true
+
+        if [ -n "$ENDPOINT" ] && [ -n "$TOKEN" ]; then
+          yarn config set npmPublishRegistry "$ENDPOINT"
+          yarn config set "npmRegistries[\"$ENDPOINT\"].npmAuthToken" "$TOKEN"
+          yarn config set "npmRegistries[\"$ENDPOINT\"].npmAlwaysAuth" true
+          echo "Configured CodeArtifact npm publish registry"
+        fi
+
+    - name: Publish JS libraries
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ ! -f "yarn.lock" ]; then exit 0; fi
+
+        yarn workspaces list --json 2>/dev/null | while read -r line; do
+          LOC=$(echo "$line" | jq -r '.location')
+          NAME=$(echo "$line" | jq -r '.name')
+          PKG="$LOC/package.json"
+          [ -f "$PKG" ] || continue
+
+          IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
+          IS_PRIVATE=$(jq -r '.private // false' "$PKG")
+
+          if [ "$IS_SERVICE" != "true" ] && [ "$IS_PRIVATE" != "true" ] && [ "$LOC" != "." ]; then
+            VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
+            echo "::group::Publish $NAME@$VERSION"
+            cd "$LOC"
+            yarn npm publish --tolerate-republish 2>&1 || echo "Publish failed for $NAME"
+            cd "$GITHUB_WORKSPACE"
+            echo "::endgroup::"
+          fi
+        done
+
+    - name: Publish Python packages
+      shell: bash
+      continue-on-error: true
+      run: |
+        if [ ! -f "uv.lock" ] && [ ! -f "pyproject.toml" ]; then exit 0; fi
+        echo "Python library publishing not yet configured"
