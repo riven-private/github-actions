@@ -86,8 +86,8 @@ jobs:
             echo "::warning::Could not get GitHub OIDC token"
             exit 0
           fi
-          RESPONSE=$(curl -sS -X POST \
-            "http://identity-service.dev-center.svc.cluster.local/com.riven.platform.identity.v1.IdentityService/ExchangeGitHubOidcToken" \
+          RESPONSE=$(curl -sS --connect-timeout 5 -X POST \
+            "http://identity-service.dev-center.svc.cluster.local:8080/com.riven.platform.identity.v1.IdentityService/ExchangeGitHubOidcToken" \
             -H "Content-Type: application/json" \
             -d "{\"providerToken\":\"$OIDC_TOKEN\",\"repository\":\"$GITHUB_REPOSITORY\",\"workflowRef\":\"$GITHUB_REF\"}" 2>&1) || true
           PLATFORM_TOKEN=$(echo "$RESPONSE" | jq -r '.accessToken // empty' 2>/dev/null) || true
