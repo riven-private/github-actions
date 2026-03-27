@@ -52,6 +52,7 @@ env:
   CODEARTIFACT_DOMAIN: dev-center
   CODEARTIFACT_DOMAIN_OWNER: "572953113830"
   ECR_REGISTRY: 572953113830.dkr.ecr.us-east-1.amazonaws.com
+  RIVEN_TOKEN: ${{ secrets.RIVEN_TOKEN }}
 
 jobs:
   ci:
