@@ -36,6 +36,8 @@ runs:
     - name: Build
       id: build
       shell: bash
+      env:
+        NODE_OPTIONS: "--max-old-space-size=3072"
       run: |
         # Build includes codegen (proto generate, prisma generate, tsc, etc.)
         # Each repo's package.json "build" script handles its own codegen chain.
