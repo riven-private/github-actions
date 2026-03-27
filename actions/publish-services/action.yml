@@ -58,29 +58,28 @@ runs:
       run: |
         SERVICES='${{ steps.discover.outputs.services }}'
         SHA=$(git rev-parse --short HEAD)
-        MAX_PARALLEL=4
-        RUNNING=0
         FAILED=0
+        COUNT=0
 
-        build_and_push() {
-          local svc="$1"
-          local NAME=$(echo "$svc" | jq -r '.name')
-          local DIR=$(echo "$svc" | jq -r '.dir')
-          local ECR=$(echo "$svc" | jq -r '.ecr')
-          local VERSION=$(echo "$svc" | jq -r '.version')
-          local DOCKERFILE=$(echo "$svc" | jq -r '.dockerfile')
-          local TAG="${VERSION}-${SHA}"
-          local IMAGE="${{ inputs.ecr-registry }}/${ECR}:${TAG}"
+        while read -r svc; do
+          NAME=$(echo "$svc" | jq -r '.name')
+          DIR=$(echo "$svc" | jq -r '.dir')
+          ECR=$(echo "$svc" | jq -r '.ecr')
+          VERSION=$(echo "$svc" | jq -r '.version')
+          DOCKERFILE=$(echo "$svc" | jq -r '.dockerfile')
+          TAG="${VERSION}-${SHA}"
+          IMAGE="${{ inputs.ecr-registry }}/${ECR}:${TAG}"
+          COUNT=$((COUNT + 1))
 
-          echo "::group::Publish $NAME → $IMAGE"
+          echo "::group::[$COUNT] Publish $NAME → $IMAGE"
 
           # Ensure ECR repo exists
           aws ecr describe-repositories --repository-names "$ECR" 2>/dev/null \
             || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true 2>/dev/null \
             || echo "Could not create ECR repo (may need permissions)"
 
-          # Build and push with CI_PREBUILT for node-service-base consumers
-          docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" \
+          # Build and push
+          if docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" \
             --build-arg WORKSPACE_NAME="$NAME" \
             --build-arg SERVICE_NAME="$NAME" \
             --build-arg SERVICE_DIR="$DIR" \
@@ -88,39 +87,23 @@ runs:
             --build-arg CI_PREBUILT=true \
             . \
             && docker push "$IMAGE" \
-            && docker push "${{ inputs.ecr-registry }}/${ECR}:latest" \
-            && echo "Published $NAME:$TAG" \
-            || { echo "::error::Failed to publish $NAME"; return 1; }
+            && docker push "${{ inputs.ecr-registry }}/${ECR}:latest"; then
+            echo "Published $NAME:$TAG"
+          else
+            echo "::error::Failed to publish $NAME"
+            FAILED=$((FAILED + 1))
+          fi
+
+          # Clean up Docker images to reclaim disk space
+          docker image prune -f 2>/dev/null || true
 
           echo "::endgroup::"
-        }
-
-        # Build services in parallel
-        PIDS=()
-        while read -r svc; do
-          build_and_push "$svc" &
-          PIDS+=($!)
-
-          if [ "${#PIDS[@]}" -ge "$MAX_PARALLEL" ]; then
-            # Wait for any one to finish
-            for pid in "${PIDS[@]}"; do
-              if ! kill -0 "$pid" 2>/dev/null; then
-                wait "$pid" || FAILED=$((FAILED + 1))
-                PIDS=("${PIDS[@]/$pid}")
-                break
-              fi
-            done
-          fi
         done < <(echo "$SERVICES" | jq -c '.[]' 2>/dev/null)
 
-        # Wait for remaining builds
-        for pid in "${PIDS[@]}"; do
-          [ -n "$pid" ] && { wait "$pid" || FAILED=$((FAILED + 1)); }
-        done
-
         if [ "$FAILED" -gt 0 ]; then
-          echo "::error::$FAILED service(s) failed to publish"
+          echo "::error::$FAILED of $COUNT service(s) failed to publish"
           exit 1
         fi
 
+        echo "Published $COUNT services successfully"
         echo "published=true" >> $GITHUB_OUTPUT
