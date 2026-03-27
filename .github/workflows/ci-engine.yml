@@ -52,12 +52,14 @@ env:
   CODEARTIFACT_DOMAIN: dev-center
   CODEARTIFACT_DOMAIN_OWNER: "572953113830"
   ECR_REGISTRY: 572953113830.dkr.ecr.us-east-1.amazonaws.com
-  RIVEN_TOKEN: ${{ secrets.RIVEN_TOKEN }}
 
 jobs:
   ci:
     runs-on: riven-runner
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
