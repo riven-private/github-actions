@@ -98,6 +98,7 @@ runs:
       with:
         path: |
           .yarn/cache
+          .yarn/install-state.gz
           node_modules
         key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
         restore-keys: |
