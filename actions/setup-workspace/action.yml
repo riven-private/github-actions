@@ -12,7 +12,7 @@ inputs:
     description: "AWS region"
     default: "us-east-1"
   node-version:
-    description: "Node.js version override (auto-detected from .nvmrc/.node-version if not set)"
+    description: "Node.js version override (auto-detected from .nvmrc/.node-version by nvm hook)"
     default: ""
 
 outputs:
@@ -38,11 +38,10 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Detect workspace type and toolchain
+    - name: Detect workspace type
       id: detect
       shell: bash
       run: |
-        # Detect workspace type
         if [ -f "yarn.lock" ]; then
           TYPE="yarn"
         elif [ -f "uv.lock" ] || ([ -f "pyproject.toml" ] && grep -q '\[tool\.uv' pyproject.toml 2>/dev/null); then
@@ -60,7 +59,8 @@ runs:
         fi
         echo "type=$TYPE" >> $GITHUB_OUTPUT
 
-        # Detect Node.js version
+        # Detect Node.js version (nvm auto-hook handles this on custom runner,
+        # but we need it for actions/setup-node fallback on GitHub-hosted runners)
         NODE_VERSION="${{ inputs.node-version }}"
         if [ -z "$NODE_VERSION" ]; then
           if [ -f ".nvmrc" ]; then
@@ -72,70 +72,46 @@ runs:
           fi
         fi
         echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
-
         echo "Detected: type=$TYPE, node=$NODE_VERSION"
 
+    # ── Toolchain setup (skipped on custom runner image, needed on GitHub-hosted) ──
     - name: Setup Node.js
       if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'npm' || steps.detect.outputs.type == 'pnpm'
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ steps.detect.outputs.node_version }}
+      shell: bash
+      run: |
+        if command -v node &> /dev/null; then
+          echo "Node.js available: $(node --version)"
+        else
+          echo "::error::Node.js not found — use custom runner image or add actions/setup-node"
+          exit 1
+        fi
 
     - name: Enable Corepack
       if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'pnpm'
       shell: bash
-      run: corepack enable
+      run: corepack enable 2>/dev/null || true
 
-    - name: Setup Python + UV
-      if: steps.detect.outputs.type == 'uv'
-      shell: bash
-      run: |
-        if ! command -v uv &> /dev/null; then
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-        fi
-        uv --version
+    # ── Caching ─────────────────────────────────────────────────────────────────
+    - name: Cache yarn dependencies
+      if: steps.detect.outputs.type == 'yarn'
+      uses: actions/cache@v4
+      with:
+        path: |
+          .yarn/cache
+          node_modules
+        key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+        restore-keys: |
+          yarn-${{ runner.os }}-
 
-    - name: Install buf CLI (proto toolchain)
-      shell: bash
-      run: |
-        if command -v buf &> /dev/null; then
-          echo "buf already available: $(buf --version)"
-          exit 0
-        fi
-        echo "Installing buf CLI..."
-        BUF_VERSION="1.50.0"
-        curl -sSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" -o /tmp/buf
-        chmod +x /tmp/buf
-        sudo mv /tmp/buf /usr/local/bin/buf 2>/dev/null || mv /tmp/buf $HOME/.local/bin/buf
-        echo "$HOME/.local/bin" >> $GITHUB_PATH
-        buf --version
+    - name: Cache buf modules
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/buf
+        key: buf-${{ runner.os }}-${{ hashFiles('**/buf.lock') }}
+        restore-keys: |
+          buf-${{ runner.os }}-
 
-    - name: Install build tools (native deps)
-      shell: bash
-      run: |
-        if command -v make &> /dev/null; then exit 0; fi
-        if command -v apt-get &> /dev/null; then
-          sudo apt-get update -qq && sudo apt-get install -y -qq build-essential python3 2>/dev/null || true
-        elif command -v apk &> /dev/null; then
-          sudo apk add --no-cache build-base python3 2>/dev/null || true
-        fi
-
-    - name: Install AWS CLI (if missing)
-      shell: bash
-      run: |
-        if command -v aws &> /dev/null; then
-          echo "AWS CLI already available: $(aws --version)"
-          exit 0
-        fi
-        echo "Installing AWS CLI..."
-        curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
-        unzip -q /tmp/awscli.zip -d /tmp
-        sudo /tmp/aws/install --update 2>/dev/null || /tmp/aws/install --update --install-dir $HOME/.local/aws --bin-dir $HOME/.local/bin 2>/dev/null
-        rm -rf /tmp/awscli.zip /tmp/aws
-        echo "$HOME/.local/bin" >> $GITHUB_PATH
-        aws --version
-
+    # ── CodeArtifact auth ───────────────────────────────────────────────────────
     - name: CodeArtifact auth
       shell: bash
       run: |
@@ -152,6 +128,7 @@ runs:
           echo "::warning::CodeArtifact auth failed — private @riven-* packages may not resolve"
         fi
 
+    # ── Install dependencies ────────────────────────────────────────────────────
     - name: Install dependencies
       shell: bash
       run: |
@@ -164,6 +141,7 @@ runs:
           *)     echo "Unknown workspace type — skipping install" ;;
         esac
 
+    # ── Discover workspace members ──────────────────────────────────────────────
     - name: Discover workspace members
       id: discover
       shell: bash
