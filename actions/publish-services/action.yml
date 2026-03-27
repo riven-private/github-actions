@@ -77,7 +77,11 @@ runs:
             || echo "Could not create ECR repo (may need permissions)"
 
           # Build and push
-          docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" . \
+          docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" \
+            --build-arg WORKSPACE_NAME="$NAME" \
+            --build-arg SERVICE_DIR="$DIR" \
+            --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
+            . \
             && docker push "$IMAGE" \
             && docker push "${{ inputs.ecr-registry }}/${ECR}:latest" \
             && echo "Published $NAME:$TAG" \
