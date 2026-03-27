@@ -61,7 +61,6 @@ jobs:
       contents: read
       id-token: write
     env:
-      RIVEN_TOKEN: ${{ secrets.RIVEN_TOKEN }}
       RIVEN_REGISTRY_URL: http://proto-registry.dev-center.svc.cluster.local:8080
     steps:
       - uses: actions/checkout@v4
