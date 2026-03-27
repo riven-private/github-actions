@@ -19,7 +19,12 @@ runs:
       id: detect
       shell: bash
       run: |
-        if [ -f "yarn.lock" ]; then
+        # Read from detection.json if setup-workspace already ran
+        if [ -f "detection.json" ]; then
+          TYPE=$(jq -r '.workspace_type' detection.json)
+          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          echo "Read workspace type from detection.json: $TYPE"
+        elif [ -f "yarn.lock" ]; then
           echo "type=yarn" >> $GITHUB_OUTPUT
         elif [ -f "pnpm-lock.yaml" ]; then
           echo "type=pnpm" >> $GITHUB_OUTPUT

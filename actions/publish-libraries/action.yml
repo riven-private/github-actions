@@ -3,13 +3,13 @@ description: "Publish workspace libraries to CodeArtifact (npm for JS, PyPI for 
 
 inputs:
   codeartifact-domain:
-    description: "CodeArtifact domain name"
+    description: "CodeArtifact domain name (see shared/defaults.env)"
     default: "dev-center"
   codeartifact-domain-owner:
-    description: "AWS account ID"
+    description: "AWS account ID (see shared/defaults.env)"
     default: "572953113830"
   npm-repository:
-    description: "CodeArtifact npm repository name"
+    description: "CodeArtifact npm repository name (see shared/defaults.env)"
     default: "dev-center-npm"
 
 runs:

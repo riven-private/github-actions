@@ -3,13 +3,13 @@ description: "Detect workspace type, setup toolchain, configure caches, install 
 
 inputs:
   codeartifact-domain:
-    description: "CodeArtifact domain name"
+    description: "CodeArtifact domain name (see shared/defaults.env)"
     default: "dev-center"
   codeartifact-domain-owner:
-    description: "AWS account ID owning the CodeArtifact domain"
+    description: "AWS account ID owning the CodeArtifact domain (see shared/defaults.env)"
     default: "572953113830"
   aws-region:
-    description: "AWS region"
+    description: "AWS region (see shared/defaults.env)"
     default: "us-east-1"
   node-version:
     description: "Node.js version override (auto-detected from .nvmrc/.node-version by nvm hook)"
@@ -212,6 +212,26 @@ runs:
 
         SVC_COUNT=$(echo "$SERVICES" | jq 'length')
         LIB_COUNT=$(echo "$LIBRARIES" | jq 'length')
-        echo "has_services=$([ "$SVC_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
-        echo "has_libraries=$([ "$LIB_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
-        echo "Discovered $SVC_COUNT services, $LIB_COUNT libraries"
+        HAS_SERVICES=$([ "$SVC_COUNT" -gt 0 ] && echo true || echo false)
+        HAS_LIBRARIES=$([ "$LIB_COUNT" -gt 0 ] && echo true || echo false)
+
+        echo "has_services=$HAS_SERVICES" >> $GITHUB_OUTPUT
+        echo "has_libraries=$HAS_LIBRARIES" >> $GITHUB_OUTPUT
+
+        # Write structured detection.json for downstream actions
+        jq -n \
+          --arg type "${{ steps.detect.outputs.type }}" \
+          --arg node_version "${{ steps.detect.outputs.node_version }}" \
+          --argjson services "$SERVICES" \
+          --argjson libraries "$LIBRARIES" \
+          --arg has_services "$HAS_SERVICES" \
+          --arg has_libraries "$HAS_LIBRARIES" \
+          '{
+            workspace_type: $type,
+            node_version: $node_version,
+            services: $services,
+            libraries: $libraries,
+            has_services: ($has_services == "true"),
+            has_libraries: ($has_libraries == "true")
+          }' > detection.json
+        echo "Discovered $SVC_COUNT services, $LIB_COUNT libraries (wrote detection.json)"
