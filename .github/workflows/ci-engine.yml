@@ -83,6 +83,9 @@ jobs:
       - uses: riven-private/github-actions/actions/publish-libraries@main
         if: inputs.publish == 'true' && steps.setup.outputs.has-libraries == 'true'
 
+      - uses: riven-private/github-actions/actions/publish-protos@main
+        if: inputs.publish == 'true'
+
       - uses: riven-private/github-actions/actions/report-results@main
         if: always()
         with:

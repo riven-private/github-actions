@@ -1,0 +1,39 @@
+name: "Publish Protos"
+description: "Discover proto directories and publish to the proto registry"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Discover and publish protos
+      shell: bash
+      run: |
+        if [ -z "$RIVEN_TOKEN" ] || [ -z "$RIVEN_REGISTRY_URL" ]; then
+          echo "::warning::RIVEN_TOKEN or RIVEN_REGISTRY_URL not set — skipping proto publish"
+          exit 0
+        fi
+
+        # Find all packages with proto directories
+        PUBLISHED=0
+        if [ -f "yarn.lock" ]; then
+          yarn workspaces list --json 2>/dev/null | while read -r line; do
+            LOC=$(echo "$line" | jq -r '.location')
+            [ "$LOC" = "." ] && continue
+            PROTO_DIR="$LOC/proto"
+            [ -d "$PROTO_DIR" ] || continue
+
+            PKG="$LOC/package.json"
+            [ -f "$PKG" ] || continue
+            NAME=$(jq -r '.name // ""' "$PKG")
+
+            echo "::group::Proto publish: $NAME ($PROTO_DIR)"
+            npx riven proto publish --proto-dir "$PROTO_DIR" \
+              --commit-sha "$GITHUB_SHA" --ref "$GITHUB_REF" 2>&1 || echo "Failed to publish protos for $NAME (non-fatal)"
+            echo "::endgroup::"
+          done
+        elif [ -d "proto" ]; then
+          # Single-package repo with proto/ at root
+          echo "::group::Proto publish: $(basename $PWD)"
+          npx riven proto publish --proto-dir proto \
+            --commit-sha "$GITHUB_SHA" --ref "$GITHUB_REF" 2>&1 || echo "Failed to publish protos (non-fatal)"
+          echo "::endgroup::"
+        fi
