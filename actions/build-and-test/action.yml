@@ -36,9 +36,9 @@ runs:
     - name: Update buf dependencies
       shell: bash
       run: |
-        # Run buf dep update in all proto directories so buf generate can resolve
+        # Run buf dep update for all buf.yaml files so buf generate can resolve
         # external deps (googleapis, protovalidate) on a fresh CI runner.
-        find . -path "*/proto/buf.yaml" -not -path "*/node_modules/*" | while read -r bufyaml; do
+        find . -name "buf.yaml" -not -path "*/node_modules/*" -not -path "*/.yarn/*" | while read -r bufyaml; do
           DIR=$(dirname "$bufyaml")
           echo "::group::buf dep update: $DIR"
           buf dep update "$DIR" 2>&1 || echo "buf dep update failed for $DIR (non-fatal)"
