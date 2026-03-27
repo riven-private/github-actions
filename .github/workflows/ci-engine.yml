@@ -47,6 +47,7 @@ concurrency:
   group: ci-${{ inputs.target_repo }}-${{ inputs.ref }}
   cancel-in-progress: true
 
+# Centralized config — keep in sync with actions/shared/defaults.env
 env:
   AWS_REGION: us-east-1
   CODEARTIFACT_DOMAIN: dev-center

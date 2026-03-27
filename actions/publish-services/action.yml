@@ -18,28 +18,35 @@ runs:
       id: discover
       shell: bash
       run: |
-        SERVICES="[]"
-        if [ -f "yarn.lock" ]; then
-          SERVICES=$(yarn workspaces list --json 2>/dev/null | while read -r line; do
-            LOC=$(echo "$line" | jq -r '.location')
-            NAME=$(echo "$line" | jq -r '.name')
-            PKG="$LOC/package.json"
-            [ -f "$PKG" ] || continue
-            IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
-            if [ "$IS_SERVICE" = "true" ]; then
-              ECR=$(jq -r '.riven.ecr' "$PKG")
-              VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
-              if [ -f "$LOC/Dockerfile" ]; then
-                DOCKERFILE="$LOC/Dockerfile"
-              else
-                DOCKERFILE="Dockerfile"
+        # Read from detection.json if setup-workspace already ran
+        if [ -f "detection.json" ]; then
+          SERVICES=$(jq -c '.services' detection.json)
+          echo "services=$SERVICES" >> $GITHUB_OUTPUT
+          echo "Read $(echo "$SERVICES" | jq length) services from detection.json"
+        else
+          SERVICES="[]"
+          if [ -f "yarn.lock" ]; then
+            SERVICES=$(yarn workspaces list --json 2>/dev/null | while read -r line; do
+              LOC=$(echo "$line" | jq -r '.location')
+              NAME=$(echo "$line" | jq -r '.name')
+              PKG="$LOC/package.json"
+              [ -f "$PKG" ] || continue
+              IS_SERVICE=$(jq -r '.riven.service // false' "$PKG")
+              if [ "$IS_SERVICE" = "true" ]; then
+                ECR=$(jq -r '.riven.ecr' "$PKG")
+                VERSION=$(jq -r '.version // "0.0.0"' "$PKG")
+                if [ -f "$LOC/Dockerfile" ]; then
+                  DOCKERFILE="$LOC/Dockerfile"
+                else
+                  DOCKERFILE="Dockerfile"
+                fi
+                echo "{\"name\":\"$NAME\",\"dir\":\"$LOC\",\"ecr\":\"$ECR\",\"version\":\"$VERSION\",\"dockerfile\":\"$DOCKERFILE\"}"
               fi
-              echo "{\"name\":\"$NAME\",\"dir\":\"$LOC\",\"ecr\":\"$ECR\",\"version\":\"$VERSION\",\"dockerfile\":\"$DOCKERFILE\"}"
-            fi
-          done | jq -sc '.')
+            done | jq -sc '.')
+          fi
+          echo "services=$SERVICES" >> $GITHUB_OUTPUT
+          echo "Found $(echo "$SERVICES" | jq length) services to publish"
         fi
-        echo "services=$SERVICES" >> $GITHUB_OUTPUT
-        echo "Found $(echo "$SERVICES" | jq length) services to publish"
 
     - name: ECR login
       if: steps.discover.outputs.services != '[]' && steps.discover.outputs.services != 'null'
