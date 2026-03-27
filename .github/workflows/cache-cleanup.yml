@@ -1,0 +1,43 @@
+name: Cache Cleanup
+
+on:
+  # Runs daily at 4am UTC
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+
+  # Reusable — other repos call this
+  workflow_call:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cleanup caches for closed branch
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "Deleting caches for branch: $BRANCH"
+          gh cache list --ref "refs/heads/$BRANCH" --json id -q '.[].id' | while read id; do
+            gh cache delete "$id" || true
+          done
+
+      - name: Cleanup stale caches (daily)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Cleaning caches older than 7 days..."
+          CUTOFF=$(date -d '7 days ago' -Iseconds 2>/dev/null || date -v-7d -Iseconds)
+          gh cache list --json id,lastAccessedAt --limit 100 -q ".[] | select(.lastAccessedAt < \"$CUTOFF\") | .id" | while read id; do
+            gh cache delete "$id" || true
+            echo "Deleted cache $id"
+          done
