@@ -15,55 +15,84 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Detect workspace type
+      id: detect
+      shell: bash
+      run: |
+        if [ -f "yarn.lock" ]; then
+          echo "type=yarn" >> $GITHUB_OUTPUT
+        elif [ -f "pnpm-lock.yaml" ]; then
+          echo "type=pnpm" >> $GITHUB_OUTPUT
+        elif [ -f "package-lock.json" ]; then
+          echo "type=npm" >> $GITHUB_OUTPUT
+        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
+          echo "type=uv" >> $GITHUB_OUTPUT
+        elif [ -f "go.mod" ]; then
+          echo "type=go" >> $GITHUB_OUTPUT
+        else
+          echo "type=unknown" >> $GITHUB_OUTPUT
+        fi
+
     - name: Build
       id: build
       shell: bash
       run: |
         # Build includes codegen (proto generate, prisma generate, tsc, etc.)
         # Each repo's package.json "build" script handles its own codegen chain.
-        if [ -f "yarn.lock" ]; then
-          yarn build
-        elif [ -f "pnpm-lock.yaml" ]; then
-          pnpm build
-        elif [ -f "package-lock.json" ]; then
-          npm run build
-        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
-          uv build 2>/dev/null || uv run python -m build 2>/dev/null || echo "No build configured"
-        elif [ -f "go.mod" ]; then
-          buf generate 2>/dev/null || true
-          go build ./...
-        fi
+        case "${{ steps.detect.outputs.type }}" in
+          yarn)  yarn build ;;
+          pnpm)  pnpm build ;;
+          npm)   npm run build ;;
+          uv)    uv build 2>/dev/null || uv run python -m build 2>/dev/null || echo "No build configured" ;;
+          go)    buf generate 2>/dev/null || true; go build ./... ;;
+          *)     echo "Unknown workspace type — skipping build" ;;
+        esac
 
     - name: Lint
       id: lint
       shell: bash
       run: |
-        if [ -f "yarn.lock" ] || [ -f "package-lock.json" ] || [ -f "pnpm-lock.yaml" ]; then
-          # Check if lint script exists
-          if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" 2>/dev/null; then
-            yarn lint 2>/dev/null || npm run lint 2>/dev/null || pnpm lint 2>/dev/null
-          else
-            echo "No lint script configured — skipping"
-          fi
-        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
-          uv run ruff check . 2>/dev/null || echo "ruff not available"
-          uv run ruff format --check . 2>/dev/null || echo "ruff format not available"
-        elif [ -f "go.mod" ]; then
-          golangci-lint run ./... 2>/dev/null || echo "golangci-lint not available"
-        fi
+        case "${{ steps.detect.outputs.type }}" in
+          yarn|npm|pnpm)
+            if node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" 2>/dev/null; then
+              case "${{ steps.detect.outputs.type }}" in
+                yarn) yarn lint ;;
+                pnpm) pnpm lint ;;
+                npm)  npm run lint ;;
+              esac
+            else
+              echo "No lint script configured — skipping"
+            fi
+            ;;
+          uv)
+            uv run ruff check . 2>/dev/null || echo "ruff not available"
+            uv run ruff format --check . 2>/dev/null || echo "ruff format not available"
+            ;;
+          go)
+            golangci-lint run ./... 2>/dev/null || echo "golangci-lint not available"
+            ;;
+        esac
 
     - name: Test
       id: test
       shell: bash
       run: |
-        if [ -f "yarn.lock" ] || [ -f "package-lock.json" ] || [ -f "pnpm-lock.yaml" ]; then
-          if node -e "const p=require('./package.json'); process.exit(p.scripts?.test ? 0 : 1)" 2>/dev/null; then
-            yarn test 2>/dev/null || npm test 2>/dev/null || pnpm test 2>/dev/null
-          else
-            echo "No test script configured — skipping"
-          fi
-        elif [ -f "uv.lock" ] || [ -f "pyproject.toml" ]; then
-          uv run pytest 2>/dev/null || echo "No tests configured"
-        elif [ -f "go.mod" ]; then
-          go test ./...
-        fi
+        case "${{ steps.detect.outputs.type }}" in
+          yarn|npm|pnpm)
+            if node -e "const p=require('./package.json'); process.exit(p.scripts?.test ? 0 : 1)" 2>/dev/null; then
+              case "${{ steps.detect.outputs.type }}" in
+                yarn) yarn test ;;
+                pnpm) pnpm test ;;
+                npm)  npm test ;;
+              esac
+            else
+              echo "No test script configured — skipping"
+            fi
+            ;;
+          uv)
+            uv run pytest 2>/dev/null || echo "No tests configured"
+            ;;
+          go)
+            go test ./...
+            ;;
+        esac

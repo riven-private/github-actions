@@ -96,6 +96,16 @@ runs:
         fi
         uv --version
 
+    - name: Install build tools (native deps)
+      shell: bash
+      run: |
+        if command -v make &> /dev/null; then exit 0; fi
+        if command -v apt-get &> /dev/null; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq build-essential python3 2>/dev/null || true
+        elif command -v apk &> /dev/null; then
+          sudo apk add --no-cache build-base python3 2>/dev/null || true
+        fi
+
     - name: Install AWS CLI (if missing)
       shell: bash
       run: |
