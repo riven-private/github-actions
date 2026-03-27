@@ -96,6 +96,21 @@ runs:
         fi
         uv --version
 
+    - name: Install buf CLI (proto toolchain)
+      shell: bash
+      run: |
+        if command -v buf &> /dev/null; then
+          echo "buf already available: $(buf --version)"
+          exit 0
+        fi
+        echo "Installing buf CLI..."
+        BUF_VERSION="1.50.0"
+        curl -sSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" -o /tmp/buf
+        chmod +x /tmp/buf
+        sudo mv /tmp/buf /usr/local/bin/buf 2>/dev/null || mv /tmp/buf $HOME/.local/bin/buf
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        buf --version
+
     - name: Install build tools (native deps)
       shell: bash
       run: |
