@@ -104,6 +104,28 @@ runs:
         restore-keys: |
           yarn-${{ runner.os }}-
 
+    - name: Cache UV dependencies
+      if: steps.detect.outputs.type == 'uv'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/uv
+          .venv
+        key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+        restore-keys: |
+          uv-${{ runner.os }}-
+
+    - name: Cache Go modules
+      if: steps.detect.outputs.type == 'go'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          go-${{ runner.os }}-
+
     - name: Cache buf modules
       uses: actions/cache@v4
       with:
