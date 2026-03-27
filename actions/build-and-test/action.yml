@@ -38,11 +38,33 @@ runs:
       run: |
         # Run buf dep update for all buf.yaml files so buf generate can resolve
         # external deps (googleapis, protovalidate) on a fresh CI runner.
+        # Copy shared proto files (com/riven/common/) from riven-cli into each
+        # service's proto dir so buf dep update and buf generate can resolve imports.
+        COMMON_PROTO_SRC=""
+        if [ -d "node_modules/@riven-private/riven-cli/proto/com/riven/common" ]; then
+          COMMON_PROTO_SRC="node_modules/@riven-private/riven-cli/proto/com/riven/common"
+        fi
+
         find . -name "buf.yaml" -not -path "*/node_modules/*" -not -path "*/.yarn/*" | while read -r bufyaml; do
           DIR=$(dirname "$bufyaml")
-          echo "::group::buf dep update: $DIR"
-          buf dep update "$DIR" 2>&1 || echo "buf dep update failed for $DIR (non-fatal)"
-          echo "::endgroup::"
+          # Find the proto module path from buf.yaml
+          PROTO_PATH=$(grep -A1 "^modules:" "$bufyaml" 2>/dev/null | grep "path:" | head -1 | awk '{print $NF}')
+          PROTO_DIR="$DIR/${PROTO_PATH:-.}"
+
+          # Copy shared common proto if the service imports it
+          if [ -n "$COMMON_PROTO_SRC" ] && [ -d "$PROTO_DIR" ]; then
+            if grep -rq "com/riven/common/" "$PROTO_DIR" 2>/dev/null; then
+              mkdir -p "$PROTO_DIR/com/riven/common"
+              cp -n $COMMON_PROTO_SRC/*.proto "$PROTO_DIR/com/riven/common/" 2>/dev/null || true
+            fi
+          fi
+
+          # Update buf deps (fetch BSR modules like googleapis, protovalidate)
+          if grep -q "^deps:" "$bufyaml" 2>/dev/null; then
+            echo "::group::buf dep update: $DIR"
+            buf dep update "$DIR" 2>&1 || echo "buf dep update skipped for $DIR"
+            echo "::endgroup::"
+          fi
         done
 
     - name: Build
