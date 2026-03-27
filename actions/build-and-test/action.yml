@@ -90,6 +90,8 @@ runs:
     - name: Test
       id: test
       shell: bash
+      env:
+        NODE_OPTIONS: "--max-old-space-size=3072"
       run: |
         case "${{ steps.detect.outputs.type }}" in
           yarn|npm|pnpm)
