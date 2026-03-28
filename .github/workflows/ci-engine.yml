@@ -87,6 +87,27 @@ jobs:
       - uses: riven-private/github-actions/actions/publish-protos@main
         if: inputs.publish == 'true'
 
+      - name: Notify platform of build
+        if: inputs.publish == 'true' && steps.setup.outputs.has-services == 'true'
+        shell: bash
+        continue-on-error: true
+        run: |
+          OWNER=$(echo "${{ inputs.target_repo }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ inputs.target_repo }}" | cut -d'/' -f2)
+          SHA=$(git rev-parse --short HEAD)
+
+          SERVICES="[]"
+          if [ -f "detection.json" ]; then
+            SERVICES=$(jq -c '[.services[].name]' detection.json 2>/dev/null || echo '[]')
+          fi
+
+          curl -s -X POST \
+            "http://dev-center-service.dev-center.svc.cluster.local:8080/riven.repository.v1.RepositoryService/NotifyBuild" \
+            -H "Content-Type: application/json" \
+            -d "{\"githubOwner\":\"$OWNER\",\"githubRepo\":\"$REPO\",\"imageTag\":\"$SHA\",\"gitSha\":\"${{ github.sha }}\",\"branch\":\"${{ github.ref_name }}\",\"services\":$SERVICES}" \
+            && echo "Build notification sent to Dev Center" \
+            || echo "Failed to notify Dev Center (non-fatal)"
+
       - uses: riven-private/github-actions/actions/report-results@main
         if: always()
         with:
