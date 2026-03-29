@@ -48,6 +48,12 @@ runs:
         COMMON_PROTO_SRC=""
         if [ -d "node_modules/@riven-private/riven-cli/proto/com/riven/common" ]; then
           COMMON_PROTO_SRC="node_modules/@riven-private/riven-cli/proto/com/riven/common"
+        else
+          # Fallback: global riven-cli install
+          GLOBAL_CLI_DIR=$(npm root -g 2>/dev/null)/@riven-private/riven-cli/proto/com/riven/common
+          if [ -d "$GLOBAL_CLI_DIR" ]; then
+            COMMON_PROTO_SRC="$GLOBAL_CLI_DIR"
+          fi
         fi
 
         find . -name "buf.yaml" -not -path "*/node_modules/*" -not -path "*/.yarn/*" | while read -r bufyaml; do

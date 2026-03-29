@@ -151,6 +151,18 @@ runs:
           echo "::warning::CodeArtifact auth failed — private @riven-* packages may not resolve"
         fi
 
+    # ── Install riven-cli (global) ──────────────────────────────────────────────
+    - name: Install riven-cli
+      if: steps.detect.outputs.type == 'yarn' || steps.detect.outputs.type == 'npm' || steps.detect.outputs.type == 'pnpm'
+      shell: bash
+      run: |
+        REGISTRY="https://dev-center-572953113830.d.codeartifact.us-east-1.amazonaws.com/npm/dev-center-npm/"
+        if npm install -g @riven-private/riven-cli@latest --registry "$REGISTRY" 2>/dev/null; then
+          echo "riven-cli $(riven -V 2>/dev/null || echo 'installed')"
+        else
+          echo "::warning::riven-cli global install failed — falling back to npx"
+        fi
+
     # ── Install dependencies ────────────────────────────────────────────────────
     - name: Install dependencies
       shell: bash
