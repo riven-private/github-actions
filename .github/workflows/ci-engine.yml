@@ -45,7 +45,7 @@ on:
 
 concurrency:
   group: ci-${{ inputs.target_repo }}-${{ inputs.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ inputs.publish != 'true' }}
 
 # Centralized config — keep in sync with actions/shared/defaults.env
 env:
@@ -66,6 +66,7 @@ jobs:
         with:
           repository: ${{ inputs.target_repo }}
           ref: ${{ inputs.ref }}
+          fetch-depth: 2  # Need HEAD~1 for changed-file detection in publish
 
       - uses: riven-private/github-actions/actions/setup-workspace@main
         id: setup
@@ -74,13 +75,245 @@ jobs:
           codeartifact-domain-owner: ${{ env.CODEARTIFACT_DOMAIN_OWNER }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ── Build phase (codegen + tsc) — must complete before lint/test/publish ──
       - uses: riven-private/github-actions/actions/build-and-test@main
-
-      - uses: riven-private/github-actions/actions/publish-services@main
-        if: inputs.publish == 'true' && steps.setup.outputs.has-services == 'true'
+        id: build
         with:
-          ecr-registry: ${{ env.ECR_REGISTRY }}
+          build-only: "true"
 
+      # ── Parallel phase: lint+test AND Docker publish run concurrently ──
+      # Docker builds only need dist/ from build step, not test results.
+      # This overlaps the ~5 min lint+test with ~3 min Docker publish.
+      - name: Lint, Test, and Publish (parallel)
+        id: verify-and-publish
+        shell: bash
+        env:
+          NODE_OPTIONS: "--max-old-space-size=3072"
+          PUBLISH: ${{ inputs.publish }}
+          HAS_SERVICES: ${{ steps.setup.outputs.has-services }}
+          HAS_LIBRARIES: ${{ steps.setup.outputs.has-libraries }}
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+        run: |
+          set +e
+          PUBLISH_PID=""
+          PUBLISH_EXIT=0
+          LINT_EXIT=0
+          TEST_EXIT=0
+
+          # ── Start Docker publish in background (main branch only) ──
+          if [ "$PUBLISH" = "true" ] && [ "$HAS_SERVICES" = "true" ]; then
+            echo "::group::Starting Docker publish in background"
+            (
+              set +e
+              # Inline the publish-services logic
+              SERVICES="[]"
+              if [ -f "detection.json" ]; then
+                SERVICES=$(jq -c '.services' detection.json)
+              fi
+              SHA=$(git rev-parse --short HEAD)
+              TOTAL=$(echo "$SERVICES" | jq 'length')
+
+              if [ "$TOTAL" -eq 0 ] || [ "$SERVICES" = "[]" ]; then
+                echo "[publish] No services to publish"
+                exit 0
+              fi
+
+              # ECR login
+              aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$ECR_REGISTRY" 2>/dev/null
+
+              # Detect changed files for skip-unchanged
+              CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+              FORCE_ALL=false
+              if [ -z "$CHANGED_FILES" ]; then
+                FORCE_ALL=true
+              elif echo "$CHANGED_FILES" | grep -qE '^(package\.json|yarn\.lock|\.yarnrc\.yml|Dockerfile$|common/)'; then
+                FORCE_ALL=true
+              fi
+
+              # Filter to changed services
+              FILTERED="[]"
+              while read -r svc; do
+                [ -z "$svc" ] && continue
+                DIR=$(echo "$svc" | jq -r '.dir')
+                NAME=$(echo "$svc" | jq -r '.name')
+                if [ "$FORCE_ALL" = "true" ] || echo "$CHANGED_FILES" | grep -q "^${DIR}/"; then
+                  FILTERED=$(echo "$FILTERED" | jq --argjson s "$svc" '. + [$s]')
+                else
+                  echo "[publish] Skipping $NAME (unchanged)"
+                fi
+              done < <(echo "$SERVICES" | jq -c '.[]')
+
+              FCOUNT=$(echo "$FILTERED" | jq 'length')
+              echo "[publish] Building $FCOUNT of $TOTAL services"
+
+              if [ "$FCOUNT" -eq 0 ]; then
+                echo "[publish] Nothing changed"
+                exit 0
+              fi
+
+              # Cache workspace list for staging
+              WS_FILE=$(mktemp)
+              yarn workspaces list --json 2>/dev/null > "$WS_FILE" || true
+              RESULT_DIR=$(mktemp -d)
+
+              # Build each service in parallel with staged context
+              IDX=0
+              PIDS=()
+              while read -r svc; do
+                [ -z "$svc" ] && continue
+                IDX=$((IDX + 1))
+                (
+                  NAME=$(echo "$svc" | jq -r '.name')
+                  DIR=$(echo "$svc" | jq -r '.dir')
+                  ECR=$(echo "$svc" | jq -r '.ecr')
+                  VERSION=$(echo "$svc" | jq -r '.version')
+                  DOCKERFILE=$(echo "$svc" | jq -r '.dockerfile')
+                  TAG="${VERSION}-${SHA}"
+                  IMAGE="${ECR_REGISTRY}/${ECR}:${TAG}"
+                  SAFE="${NAME//\//_}"
+
+                  echo "[publish $IDX/$FCOUNT] $NAME → $IMAGE"
+
+                  # Stage minimal context
+                  STAGE=$(mktemp -d)
+                  cp package.json yarn.lock .yarnrc.yml "$STAGE/"
+                  [ -d ".yarn" ] && cp -r .yarn "$STAGE/.yarn"
+                  while IFS= read -r ws; do
+                    [ -z "$ws" ] && continue
+                    WL=$(echo "$ws" | jq -r '.location')
+                    [ "$WL" = "." ] && continue
+                    mkdir -p "$STAGE/$WL"
+                    [ -f "$WL/package.json" ] && cp "$WL/package.json" "$STAGE/$WL/package.json"
+                  done < "$WS_FILE"
+                  mkdir -p "$STAGE/$DIR"
+                  cp "$DIR/package.json" "$STAGE/$DIR/"
+                  [ -d "$DIR/dist" ] && cp -r "$DIR/dist" "$STAGE/$DIR/dist"
+                  [ -d "$DIR/proto" ] && cp -r "$DIR/proto" "$STAGE/$DIR/proto"
+                  [ -d "$DIR/prisma" ] && cp -r "$DIR/prisma" "$STAGE/$DIR/prisma"
+                  if [ -d "$DIR/src/__generated__/prisma" ]; then
+                    mkdir -p "$STAGE/$DIR/src/__generated__"
+                    cp -r "$DIR/src/__generated__/prisma" "$STAGE/$DIR/src/__generated__/prisma"
+                  fi
+                  mkdir -p "$STAGE/$(dirname "$DOCKERFILE")"
+                  cp "$DOCKERFILE" "$STAGE/$DOCKERFILE"
+
+                  # Ensure ECR repo
+                  aws ecr describe-repositories --repository-names "$ECR" >/dev/null 2>&1 \
+                    || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 \
+                    || true
+
+                  # Build and push
+                  if docker build -t "$IMAGE" -t "${ECR_REGISTRY}/${ECR}:latest" \
+                    -f "$STAGE/$DOCKERFILE" \
+                    --build-arg WORKSPACE_NAME="$NAME" \
+                    --build-arg SERVICE_NAME="$NAME" \
+                    --build-arg SERVICE_DIR="$DIR" \
+                    --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
+                    --build-arg CI_PREBUILT=true \
+                    "$STAGE" \
+                    && docker push "$IMAGE" \
+                    && docker push "${ECR_REGISTRY}/${ECR}:latest"; then
+                    echo "OK" > "$RESULT_DIR/${SAFE}.status"
+                    echo "[publish $IDX/$FCOUNT] Published $NAME:$TAG"
+                  else
+                    echo "FAIL" > "$RESULT_DIR/${SAFE}.status"
+                    echo "[publish $IDX/$FCOUNT] FAILED $NAME"
+                  fi
+                  rm -rf "$STAGE"
+                ) &
+                PIDS+=($!)
+              done < <(echo "$FILTERED" | jq -c '.[]')
+
+              # Wait for all parallel Docker builds
+              for pid in "${PIDS[@]}"; do
+                wait "$pid" 2>/dev/null || true
+              done
+
+              # Check results
+              FAILED=0
+              for sf in "$RESULT_DIR"/*.status; do
+                [ -f "$sf" ] || continue
+                [ "$(cat "$sf")" = "FAIL" ] && FAILED=$((FAILED + 1))
+              done
+              rm -rf "$RESULT_DIR" "$WS_FILE"
+              docker image prune -f 2>/dev/null || true
+
+              if [ "$FAILED" -gt 0 ]; then
+                echo "[publish] $FAILED service(s) failed"
+                exit 1
+              fi
+              echo "[publish] All services published"
+            ) > /tmp/publish.log 2>&1 &
+            PUBLISH_PID=$!
+            echo "Docker publish started (PID $PUBLISH_PID)"
+            echo "::endgroup::"
+          fi
+
+          # ── Lint + Test in parallel (foreground) ──
+          TYPE="yarn"
+          if [ -f "detection.json" ]; then
+            TYPE=$(jq -r '.workspace_type' detection.json)
+          fi
+
+          HAS_LINT=$(node -e "const p=require('./package.json'); process.exit(p.scripts?.lint ? 0 : 1)" 2>/dev/null && echo "true" || echo "false")
+          HAS_TEST=$(node -e "const p=require('./package.json'); process.exit(p.scripts?.test ? 0 : 1)" 2>/dev/null && echo "true" || echo "false")
+
+          # Start lint in background
+          if [ "$HAS_LINT" = "true" ]; then
+            (
+              case "$TYPE" in
+                yarn) yarn lint ;;
+                pnpm) pnpm lint ;;
+                npm)  npm run lint ;;
+                uv)   uv run ruff check .; uv run ruff format --check . ;;
+                go)   golangci-lint run ./... ;;
+              esac
+            ) > /tmp/lint.log 2>&1 &
+            LINT_PID=$!
+          fi
+
+          # Run test in foreground
+          if [ "$HAS_TEST" = "true" ]; then
+            case "$TYPE" in
+              yarn) yarn test || TEST_EXIT=$? ;;
+              pnpm) pnpm test || TEST_EXIT=$? ;;
+              npm)  npm test || TEST_EXIT=$? ;;
+              uv)   uv run pytest || TEST_EXIT=$? ;;
+              go)   go test ./... || TEST_EXIT=$? ;;
+            esac
+          fi
+
+          # Collect lint
+          if [ "$HAS_LINT" = "true" ]; then
+            wait "$LINT_PID" || LINT_EXIT=$?
+            echo "::group::Lint output"
+            cat /tmp/lint.log 2>/dev/null || true
+            echo "::endgroup::"
+          fi
+
+          # ── Wait for Docker publish ──
+          if [ -n "$PUBLISH_PID" ]; then
+            wait "$PUBLISH_PID" || PUBLISH_EXIT=$?
+            echo "::group::Docker publish output"
+            cat /tmp/publish.log 2>/dev/null || true
+            echo "::endgroup::"
+            if [ "$PUBLISH_EXIT" -ne 0 ]; then
+              echo "::error::Docker publish failed (exit $PUBLISH_EXIT)"
+            fi
+          fi
+
+          # ── Report results ──
+          if [ "$LINT_EXIT" -ne 0 ]; then
+            echo "::error::Lint failed (exit $LINT_EXIT)"
+          fi
+          if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "::error::Test failed (exit $TEST_EXIT)"
+          fi
+
+          # Fail if any phase failed
+          [ "$LINT_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ] && [ "$PUBLISH_EXIT" -eq 0 ]
+
+      # ── Post-publish: libraries, protos, notify (only on main, sequential) ──
       - uses: riven-private/github-actions/actions/publish-libraries@main
         if: inputs.publish == 'true' && steps.setup.outputs.has-libraries == 'true'
 
