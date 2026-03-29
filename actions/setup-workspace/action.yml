@@ -157,7 +157,12 @@ runs:
       shell: bash
       run: |
         REGISTRY="https://dev-center-572953113830.d.codeartifact.us-east-1.amazonaws.com/npm/dev-center-npm/"
-        if npm install -g @riven-private/riven-cli@latest --registry "$REGISTRY" 2>/dev/null; then
+        if [ -n "${CODEARTIFACT_AUTH_TOKEN:-}" ]; then
+          # Configure npm to authenticate with CodeArtifact for @riven-private scope
+          echo "//dev-center-572953113830.d.codeartifact.us-east-1.amazonaws.com/npm/dev-center-npm/:_authToken=${CODEARTIFACT_AUTH_TOKEN}" >> ~/.npmrc
+          echo "@riven-private:registry=${REGISTRY}" >> ~/.npmrc
+        fi
+        if npm install -g @riven-private/riven-cli@latest --registry "$REGISTRY" 2>&1; then
           echo "riven-cli $(riven -V 2>/dev/null || echo 'installed')"
         else
           echo "::warning::riven-cli global install failed — falling back to npx"
