@@ -13,6 +13,12 @@ runs:
         fi
 
         # Find all packages with proto directories
+        # Prefer global riven, fall back to npx
+        RIVEN_CMD="npx riven"
+        if command -v riven &>/dev/null; then
+          RIVEN_CMD="riven"
+        fi
+
         PUBLISHED=0
         if [ -f "yarn.lock" ]; then
           yarn workspaces list --json 2>/dev/null | while read -r line; do
@@ -26,14 +32,14 @@ runs:
             NAME=$(jq -r '.name // ""' "$PKG")
 
             echo "::group::Proto publish: $NAME ($PROTO_DIR)"
-            npx riven proto publish --proto-dir "$PROTO_DIR" \
+            $RIVEN_CMD proto publish --proto-dir "$PROTO_DIR" \
               --commit-sha "$GITHUB_SHA" --ref "$GITHUB_REF" 2>&1 || echo "Failed to publish protos for $NAME (non-fatal)"
             echo "::endgroup::"
           done
         elif [ -d "proto" ]; then
           # Single-package repo with proto/ at root
           echo "::group::Proto publish: $(basename $PWD)"
-          npx riven proto publish --proto-dir proto \
+          $RIVEN_CMD proto publish --proto-dir proto \
             --commit-sha "$GITHUB_SHA" --ref "$GITHUB_REF" 2>&1 || echo "Failed to publish protos (non-fatal)"
           echo "::endgroup::"
         fi
