@@ -1,5 +1,5 @@
 name: "Publish Services"
-description: "Discover riven.service packages, build Docker images, and push to ECR"
+description: "Discover riven.service packages, build Docker images in parallel with minimal staged contexts, push to ECR. Skips unchanged services."
 
 inputs:
   ecr-registry:
@@ -8,8 +8,11 @@ inputs:
 
 outputs:
   published:
-    description: "JSON array of published services with tags"
+    description: "Whether services were published"
     value: ${{ steps.publish.outputs.published }}
+  skipped:
+    description: "Number of services skipped (unchanged)"
+    value: ${{ steps.publish.outputs.skipped }}
 
 runs:
   using: "composite"
@@ -18,7 +21,6 @@ runs:
       id: discover
       shell: bash
       run: |
-        # Read from detection.json if setup-workspace already ran
         if [ -f "detection.json" ]; then
           SERVICES=$(jq -c '.services' detection.json)
           echo "services=$SERVICES" >> $GITHUB_OUTPUT
@@ -59,58 +61,192 @@ runs:
           echo "AWS CLI not available — skipping ECR login"
         fi
 
-    - name: Build and push services
+    - name: Build and push services (parallel)
       id: publish
       shell: bash
       run: |
+        set +e
         SERVICES='${{ steps.discover.outputs.services }}'
         SHA=$(git rev-parse --short HEAD)
-        FAILED=0
-        COUNT=0
+        TOTAL=$(echo "$SERVICES" | jq 'length')
 
+        if [ "$TOTAL" -eq 0 ] || [ "$SERVICES" = "[]" ] || [ "$SERVICES" = "null" ]; then
+          echo "No services to publish"
+          echo "published=false" >> $GITHUB_OUTPUT
+          echo "skipped=0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        RESULT_DIR=$(mktemp -d)
+
+        # ── 1. Detect changed files ──────────────────────────────────
+        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+        FORCE_ALL=false
+
+        if [ -z "$CHANGED_FILES" ]; then
+          FORCE_ALL=true
+          echo "Cannot determine changes — building all services"
+        elif echo "$CHANGED_FILES" | grep -qE '^(package\.json|yarn\.lock|\.yarnrc\.yml|Dockerfile$|common/)'; then
+          FORCE_ALL=true
+          echo "Root/shared files changed — building all services"
+        fi
+
+        # ── 2. Filter to changed services ────────────────────────────
+        FILTERED_SERVICES="[]"
         while read -r svc; do
-          NAME=$(echo "$svc" | jq -r '.name')
+          [ -z "$svc" ] && continue
           DIR=$(echo "$svc" | jq -r '.dir')
-          ECR=$(echo "$svc" | jq -r '.ecr')
-          VERSION=$(echo "$svc" | jq -r '.version')
-          DOCKERFILE=$(echo "$svc" | jq -r '.dockerfile')
-          TAG="${VERSION}-${SHA}"
-          IMAGE="${{ inputs.ecr-registry }}/${ECR}:${TAG}"
-          COUNT=$((COUNT + 1))
-
-          echo "::group::[$COUNT] Publish $NAME → $IMAGE"
-
-          # Ensure ECR repo exists
-          aws ecr describe-repositories --repository-names "$ECR" 2>/dev/null \
-            || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true 2>/dev/null \
-            || echo "Could not create ECR repo (may need permissions)"
-
-          # Build and push
-          if docker build -t "$IMAGE" -t "${{ inputs.ecr-registry }}/${ECR}:latest" -f "$DOCKERFILE" \
-            --build-arg WORKSPACE_NAME="$NAME" \
-            --build-arg SERVICE_NAME="$NAME" \
-            --build-arg SERVICE_DIR="$DIR" \
-            --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
-            --build-arg CI_PREBUILT=true \
-            . \
-            && docker push "$IMAGE" \
-            && docker push "${{ inputs.ecr-registry }}/${ECR}:latest"; then
-            echo "Published $NAME:$TAG"
+          NAME=$(echo "$svc" | jq -r '.name')
+          if [ "$FORCE_ALL" = "true" ] || echo "$CHANGED_FILES" | grep -q "^${DIR}/"; then
+            FILTERED_SERVICES=$(echo "$FILTERED_SERVICES" | jq --argjson s "$svc" '. + [$s]')
           else
-            echo "::error::Failed to publish $NAME"
-            FAILED=$((FAILED + 1))
+            echo "Skipping $NAME (no changes in $DIR/)"
           fi
-
-          # Clean up Docker images to reclaim disk space
-          docker image prune -f 2>/dev/null || true
-
-          echo "::endgroup::"
         done < <(echo "$SERVICES" | jq -c '.[]' 2>/dev/null)
 
-        if [ "$FAILED" -gt 0 ]; then
-          echo "::error::$FAILED of $COUNT service(s) failed to publish"
+        FILTERED_COUNT=$(echo "$FILTERED_SERVICES" | jq 'length')
+        SKIPPED=$((TOTAL - FILTERED_COUNT))
+        echo "Building $FILTERED_COUNT of $TOTAL services ($SKIPPED unchanged, skipped)"
+        echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+
+        if [ "$FILTERED_COUNT" -eq 0 ]; then
+          echo "No services changed — nothing to publish"
+          echo "published=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # ── 3. Cache workspace list for context staging ──────────────
+        WS_LIST_FILE=$(mktemp)
+        yarn workspaces list --json 2>/dev/null > "$WS_LIST_FILE" || true
+
+        # ── 4. Write per-service build script ────────────────────────
+        BUILD_SCRIPT=$(mktemp)
+        cat > "$BUILD_SCRIPT" << 'EOFSCRIPT'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        IDX="$1"; SVC_JSON="$2"; SHA="$3"; ECR_REGISTRY="$4"
+        TOTAL="$5"; RESULT_DIR="$6"; WS_FILE="$7"
+
+        NAME=$(echo "$SVC_JSON" | jq -r '.name')
+        DIR=$(echo "$SVC_JSON" | jq -r '.dir')
+        ECR=$(echo "$SVC_JSON" | jq -r '.ecr')
+        VERSION=$(echo "$SVC_JSON" | jq -r '.version')
+        DOCKERFILE=$(echo "$SVC_JSON" | jq -r '.dockerfile')
+        TAG="${VERSION}-${SHA}"
+        IMAGE="${ECR_REGISTRY}/${ECR}:${TAG}"
+        SAFE_NAME="${NAME//\//_}"
+        LOG="$RESULT_DIR/${SAFE_NAME}.log"
+
+        exec > >(tee -a "$LOG") 2>&1
+        echo "[$IDX/$TOTAL] Building $NAME → $IMAGE"
+
+        # ── Stage minimal Docker context ──
+        STAGE=$(mktemp -d)
+
+        # Root workspace files (needed by yarn workspaces focus)
+        cp package.json yarn.lock .yarnrc.yml "$STAGE/"
+        [ -d ".yarn" ] && cp -r .yarn "$STAGE/.yarn"
+
+        # All workspace package.json stubs (needed for yarn resolution)
+        while IFS= read -r ws_line; do
+          [ -z "$ws_line" ] && continue
+          WS_LOC=$(echo "$ws_line" | jq -r '.location')
+          [ "$WS_LOC" = "." ] && continue
+          mkdir -p "$STAGE/$WS_LOC"
+          [ -f "$WS_LOC/package.json" ] && cp "$WS_LOC/package.json" "$STAGE/$WS_LOC/package.json"
+        done < "$WS_FILE"
+
+        # Service build artifacts
+        mkdir -p "$STAGE/$DIR"
+        cp "$DIR/package.json" "$STAGE/$DIR/"
+        [ -d "$DIR/dist" ] && cp -r "$DIR/dist" "$STAGE/$DIR/dist"
+        [ -d "$DIR/proto" ] && cp -r "$DIR/proto" "$STAGE/$DIR/proto"
+        [ -d "$DIR/prisma" ] && cp -r "$DIR/prisma" "$STAGE/$DIR/prisma"
+        if [ -d "$DIR/src/__generated__/prisma" ]; then
+          mkdir -p "$STAGE/$DIR/src/__generated__"
+          cp -r "$DIR/src/__generated__/prisma" "$STAGE/$DIR/src/__generated__/prisma"
+        fi
+
+        # Copy Dockerfile into staged context
+        mkdir -p "$STAGE/$(dirname "$DOCKERFILE")"
+        cp "$DOCKERFILE" "$STAGE/$DOCKERFILE"
+
+        STAGE_SIZE=$(du -sh "$STAGE" 2>/dev/null | cut -f1)
+        echo "[$IDX/$TOTAL] Staged context: $STAGE_SIZE"
+
+        # ── Ensure ECR repo exists ──
+        aws ecr describe-repositories --repository-names "$ECR" >/dev/null 2>&1 \
+          || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 \
+          || true
+
+        # ── Build and push ──
+        if docker build -t "$IMAGE" -t "${ECR_REGISTRY}/${ECR}:latest" \
+          -f "$STAGE/$DOCKERFILE" \
+          --build-arg WORKSPACE_NAME="$NAME" \
+          --build-arg SERVICE_NAME="$NAME" \
+          --build-arg SERVICE_DIR="$DIR" \
+          --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
+          --build-arg CI_PREBUILT=true \
+          "$STAGE" \
+          && docker push "$IMAGE" \
+          && docker push "${ECR_REGISTRY}/${ECR}:latest"; then
+          echo "OK" > "$RESULT_DIR/${SAFE_NAME}.status"
+          echo "[$IDX/$TOTAL] Published $NAME:$TAG"
+        else
+          echo "FAIL" > "$RESULT_DIR/${SAFE_NAME}.status"
+          echo "[$IDX/$TOTAL] FAILED to publish $NAME"
           exit 1
         fi
 
-        echo "Published $COUNT services successfully"
+        # Clean up staged context (images stay for push)
+        rm -rf "$STAGE"
+        EOFSCRIPT
+        chmod +x "$BUILD_SCRIPT"
+
+        # ── 5. Launch parallel builds ────────────────────────────────
+        IDX=0
+        PIDS=()
+        while read -r svc; do
+          [ -z "$svc" ] && continue
+          IDX=$((IDX + 1))
+          bash "$BUILD_SCRIPT" "$IDX" "$svc" "$SHA" "${{ inputs.ecr-registry }}" \
+            "$FILTERED_COUNT" "$RESULT_DIR" "$WS_LIST_FILE" &
+          PIDS+=($!)
+        done < <(echo "$FILTERED_SERVICES" | jq -c '.[]' 2>/dev/null)
+
+        echo "Launched ${#PIDS[@]} parallel Docker builds"
+
+        # ── 6. Wait and collect results ──────────────────────────────
+        for pid in "${PIDS[@]}"; do
+          wait "$pid" 2>/dev/null || true
+        done
+
+        # Print grouped logs and count failures
+        FAILED=0
+        PUBLISHED=0
+        for status_file in "$RESULT_DIR"/*.status; do
+          [ -f "$status_file" ] || continue
+          SAFE=$(basename "$status_file" .status)
+          echo "::group::Docker: $SAFE"
+          cat "$RESULT_DIR/${SAFE}.log" 2>/dev/null || true
+          echo "::endgroup::"
+          if [ "$(cat "$status_file")" = "FAIL" ]; then
+            FAILED=$((FAILED + 1))
+          else
+            PUBLISHED=$((PUBLISHED + 1))
+          fi
+        done
+
+        # Clean up temp files
+        rm -rf "$RESULT_DIR" "$WS_LIST_FILE" "$BUILD_SCRIPT"
+
+        # Prune all Docker images after parallel builds complete
+        docker image prune -f 2>/dev/null || true
+
+        if [ "$FAILED" -gt 0 ]; then
+          echo "::error::$FAILED of $FILTERED_COUNT service(s) failed to publish"
+          exit 1
+        fi
+
+        echo "Published $PUBLISHED services ($SKIPPED skipped)"
         echo "published=true" >> $GITHUB_OUTPUT
