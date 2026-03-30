@@ -181,6 +181,15 @@ runs:
           *)     echo "Unknown workspace type — skipping install" ;;
         esac
 
+    # ── Pre-pull test container images (background) ──────────────────────────────
+    - name: Pre-pull TestContainers images
+      shell: bash
+      run: |
+        if command -v docker &> /dev/null; then
+          # Pull postgres in background — ready by the time tests need it
+          docker pull postgres:16-alpine > /dev/null 2>&1 &
+        fi
+
     # ── Discover workspace members ──────────────────────────────────────────────
     - name: Discover workspace members
       id: discover
