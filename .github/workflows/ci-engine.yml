@@ -190,9 +190,9 @@ jobs:
                   [ -d "$DIR/dist" ] && cp -r "$DIR/dist" "$STAGE/$DIR/dist"
                   [ -d "$DIR/proto" ] && cp -r "$DIR/proto" "$STAGE/$DIR/proto"
                   [ -d "$DIR/prisma" ] && cp -r "$DIR/prisma" "$STAGE/$DIR/prisma"
-                  if [ -d "$DIR/src/__generated__/prisma" ]; then
+                  if [ -d "$DIR/src/__generated__" ]; then
                     mkdir -p "$STAGE/$DIR/src/__generated__"
-                    cp -r "$DIR/src/__generated__/prisma" "$STAGE/$DIR/src/__generated__/prisma"
+                    cp -r "$DIR/src/__generated__"/* "$STAGE/$DIR/src/__generated__/" 2>/dev/null || true
                   fi
                   mkdir -p "$STAGE/$(dirname "$DOCKERFILE")"
                   cp "$DOCKERFILE" "$STAGE/$DOCKERFILE"
