@@ -186,8 +186,12 @@ runs:
       shell: bash
       run: |
         if command -v docker &> /dev/null; then
-          # Pull postgres in background — ready by the time tests need it
-          docker pull postgres:16-alpine > /dev/null 2>&1 &
+          ECR=572953113830.dkr.ecr.us-east-1.amazonaws.com
+          # ECR login for mirrored images (IAM role on ARC runners)
+          aws ecr get-login-password --region us-east-1 2>/dev/null | docker login --username AWS --password-stdin "$ECR" 2>/dev/null || true
+          # Pull from ECR mirror and re-tag so testcontainers finds it by Docker Hub name
+          (docker pull "$ECR/postgres-alpine:16" > /dev/null 2>&1 \
+            && docker tag "$ECR/postgres-alpine:16" postgres:16-alpine) &
         fi
 
     # ── Discover workspace members ──────────────────────────────────────────────
