@@ -202,12 +202,12 @@ jobs:
                     || aws ecr create-repository --repository-name "$ECR" --image-scanning-configuration scanOnPush=true >/dev/null 2>&1 \
                     || true
 
-                  # Build and push
-                  if docker build -t "$IMAGE" -t "${ECR_REGISTRY}/${ECR}:latest" \
+                  # Build and push (secret mounted, never baked into layers)
+                  if DOCKER_BUILDKIT=1 docker build -t "$IMAGE" -t "${ECR_REGISTRY}/${ECR}:latest" \
                     -f "$STAGE/$DOCKERFILE" \
                     --build-arg SERVICE_NAME="$NAME" \
-                    --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
                     --build-arg CI_PREBUILT=true \
+                    --secret id=codeartifact_token,env=CODEARTIFACT_AUTH_TOKEN \
                     "$STAGE" \
                     && docker push "$IMAGE" \
                     && docker push "${ECR_REGISTRY}/${ECR}:latest"; then
