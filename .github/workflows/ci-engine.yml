@@ -205,9 +205,7 @@ jobs:
                   # Build and push
                   if docker build -t "$IMAGE" -t "${ECR_REGISTRY}/${ECR}:latest" \
                     -f "$STAGE/$DOCKERFILE" \
-                    --build-arg WORKSPACE_NAME="$NAME" \
                     --build-arg SERVICE_NAME="$NAME" \
-                    --build-arg SERVICE_DIR="$DIR" \
                     --build-arg CODEARTIFACT_AUTH_TOKEN="${CODEARTIFACT_AUTH_TOKEN:-}" \
                     --build-arg CI_PREBUILT=true \
                     "$STAGE" \
