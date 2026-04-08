@@ -346,3 +346,38 @@ jobs:
           repository-id: ${{ inputs.devcenter_repository_id }}
           check-run-id: ${{ inputs.check_run_id }}
           status: ${{ job.status }}
+
+      # Update the check run on the target repo (cross-repo dispatch needs App token)
+      - name: Generate GitHub App token
+        id: app-token
+        if: always() && inputs.check_run_id != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GOHAN_APP_ID }}
+          private-key: ${{ secrets.GOHAN_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Update check run
+        if: always() && inputs.check_run_id != '' && steps.app-token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          OWNER="${{ inputs.target_repo && contains(inputs.target_repo, '/') && format('{0}', inputs.target_repo) || '' }}"
+          if [ -z "$OWNER" ]; then
+            echo "No target_repo — skipping check run update"
+            exit 0
+          fi
+          REPO_OWNER="${OWNER%%/*}"
+          REPO_NAME="${OWNER##*/}"
+          CONCLUSION="${{ job.status == 'success' && 'success' || 'failure' }}"
+
+          gh api \
+            --method PATCH \
+            "/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
+            -f status=completed \
+            -f "conclusion=${CONCLUSION}" \
+            -f "completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -f "output[title]=CI ${CONCLUSION}" \
+            -f "output[summary]=[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            && echo "Check run updated" \
+            || echo "Failed to update check run (non-fatal)"
