@@ -362,13 +362,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          OWNER="${{ inputs.target_repo && contains(inputs.target_repo, '/') && format('{0}', inputs.target_repo) || '' }}"
-          if [ -z "$OWNER" ]; then
-            echo "No target_repo — skipping check run update"
+          TARGET="${{ inputs.target_repo }}"
+          if [ -z "$TARGET" ] || ! echo "$TARGET" | grep -q '/'; then
+            echo "No valid target_repo — skipping check run update"
             exit 0
           fi
-          REPO_OWNER="${OWNER%%/*}"
-          REPO_NAME="${OWNER##*/}"
+          REPO_OWNER="${TARGET%%/*}"
+          REPO_NAME="${TARGET##*/}"
           CONCLUSION="${{ job.status == 'success' && 'success' || 'failure' }}"
 
           gh api \
@@ -379,5 +379,5 @@ jobs:
             -f "completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -f "output[title]=CI ${CONCLUSION}" \
             -f "output[summary]=[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
-            && echo "Check run updated" \
+            && echo "Check run updated on ${TARGET}" \
             || echo "Failed to update check run (non-fatal)"
