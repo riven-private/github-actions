@@ -44,7 +44,12 @@ on:
         default: "false"
 
 concurrency:
-  group: ci-${{ inputs.target_repo }}-${{ github.ref }}
+  # For PR dispatches we want newer pushes on the same PR to cancel older runs,
+  # so we key by pr_number. For push (publish) dispatches pr_number is empty,
+  # so we fall back to the target ref/SHA — distinct commits run independently.
+  # github.ref here is always refs/heads/main of this repo (workflow_dispatch ref),
+  # which is why the prior key canceled unrelated target_repo runs. See dev-center#112 diagnosis.
+  group: ci-${{ inputs.target_repo }}-${{ inputs.pr_number || inputs.ref }}
   cancel-in-progress: true
 
 # Centralized config — keep in sync with actions/shared/defaults.env
