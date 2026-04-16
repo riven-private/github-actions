@@ -67,10 +67,23 @@ jobs:
       RIVEN_TOKEN: ${{ secrets.RIVEN_TOKEN }}
       RIVEN_REGISTRY_URL: http://proto-registry.dev-center.svc.cluster.local:8080
     steps:
+      # Mint a short-lived GitHub App token scoped to the org — needed to
+      # clone private target repos (the default GITHUB_TOKEN is scoped only
+      # to this workflow's repo and returns "Repository not found" for any
+      # riven-private/* target other than github-actions itself).
+      - name: Generate GitHub App token for target repo access
+        id: target-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GOHAN_APP_ID }}
+          private-key: ${{ secrets.GOHAN_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - uses: actions/checkout@v5
         with:
           repository: ${{ inputs.target_repo }}
           ref: ${{ inputs.ref }}
+          token: ${{ steps.target-token.outputs.token }}
           fetch-depth: 2  # Need HEAD~1 for changed-file detection in publish
 
       - uses: riven-private/github-actions/actions/setup-workspace@main
@@ -352,20 +365,12 @@ jobs:
           check-run-id: ${{ inputs.check_run_id }}
           status: ${{ job.status }}
 
-      # Update the check run on the target repo (cross-repo dispatch needs App token)
-      - name: Generate GitHub App token
-        id: app-token
-        if: always() && inputs.check_run_id != ''
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.GOHAN_APP_ID }}
-          private-key: ${{ secrets.GOHAN_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
+      # Reuse the target-token minted at the top of the job for the cross-repo
+      # check-run update (removed the duplicate mint below).
       - name: Update check run
-        if: always() && inputs.check_run_id != '' && steps.app-token.outputs.token != ''
+        if: always() && inputs.check_run_id != '' && steps.target-token.outputs.token != ''
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.target-token.outputs.token }}
         run: |
           TARGET="${{ inputs.target_repo }}"
           if [ -z "$TARGET" ] || ! echo "$TARGET" | grep -q '/'; then
