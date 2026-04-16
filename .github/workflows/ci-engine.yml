@@ -79,6 +79,32 @@ jobs:
           private-key: ${{ secrets.GOHAN_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
+      # Point the check's details_url at this workflow_run BEFORE any real
+      # work starts, so users clicking the pending check on GitHub land on
+      # a page with all steps + streaming logs instead of the target repo's
+      # root (which is what gohan-bot-app sets at check creation). Running
+      # this first also means detailsUrl is correct even if the job later
+      # fails before the final "Update check run" step.
+      - name: Update check details_url to this workflow run
+        if: inputs.check_run_id != ''
+        env:
+          GH_TOKEN: ${{ steps.target-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TARGET="${{ inputs.target_repo }}"
+          if [ -z "$TARGET" ] || ! echo "$TARGET" | grep -q '/'; then
+            echo "No valid target_repo — skipping details_url update"
+            exit 0
+          fi
+          REPO_OWNER="${TARGET%%/*}"
+          REPO_NAME="${TARGET##*/}"
+          gh api \
+            --method PATCH \
+            "/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
+            -f "details_url=${RUN_URL}" \
+            && echo "Check details_url set to ${RUN_URL}" \
+            || echo "Failed to set check details_url (non-fatal)"
+
       - uses: actions/checkout@v5
         with:
           repository: ${{ inputs.target_repo }}
