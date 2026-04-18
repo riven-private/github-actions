@@ -68,11 +68,16 @@ jobs:
       RIVEN_REGISTRY_URL: http://proto-registry.dev-center.svc.cluster.local:8080
     steps:
       # Mint a short-lived GitHub App token scoped to the org — needed to
-      # clone private target repos (the default GITHUB_TOKEN is scoped only
-      # to this workflow's repo and returns "Repository not found" for any
-      # riven-private/* target other than github-actions itself).
+      # clone private target repos in cross-repo workflow_dispatch flows
+      # (gohan-bot-app dispatches ci-engine.yml in this repo against a
+      # different target). For reusable-workflow callers (a repo's own
+      # ci.yml calls ci-engine.yml), github.repository already matches
+      # inputs.target_repo and the default GITHUB_TOKEN works — so skip
+      # this step to avoid a hard failure on PRs from repos whose secrets
+      # don't include GOHAN_APP_ID/GOHAN_PRIVATE_KEY.
       - name: Generate GitHub App token for target repo access
         id: target-token
+        if: inputs.target_repo != github.repository
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.GOHAN_APP_ID }}
@@ -84,9 +89,10 @@ jobs:
       # a page with all steps + streaming logs instead of the target repo's
       # root (which is what gohan-bot-app sets at check creation). Running
       # this first also means detailsUrl is correct even if the job later
-      # fails before the final "Update check run" step.
+      # fails before the final "Update check run" step. Requires the cross-
+      # repo app token, so it's skipped for reusable-workflow callers.
       - name: Update check details_url to this workflow run
-        if: inputs.check_run_id != ''
+        if: inputs.check_run_id != '' && steps.target-token.outputs.token != ''
         env:
           GH_TOKEN: ${{ steps.target-token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -109,7 +115,11 @@ jobs:
         with:
           repository: ${{ inputs.target_repo }}
           ref: ${{ inputs.ref }}
-          token: ${{ steps.target-token.outputs.token }}
+          # Cross-repo dispatches need the app token to clone a different
+          # private repo; reusable-workflow callers leave this empty so
+          # checkout falls back to the default GITHUB_TOKEN (which is
+          # already scoped to the caller repo).
+          token: ${{ steps.target-token.outputs.token || github.token }}
           fetch-depth: 2  # Need HEAD~1 for changed-file detection in publish
 
       - uses: riven-private/github-actions/actions/setup-workspace@main
