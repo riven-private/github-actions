@@ -97,6 +97,7 @@ jobs:
           GH_TOKEN: ${{ steps.target-token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
           TARGET="${{ inputs.target_repo }}"
           if [ -z "$TARGET" ] || ! echo "$TARGET" | grep -q '/'; then
             echo "No valid target_repo — skipping details_url update"
@@ -104,12 +105,21 @@ jobs:
           fi
           REPO_OWNER="${TARGET%%/*}"
           REPO_NAME="${TARGET##*/}"
-          gh api \
-            --method PATCH \
-            "/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
-            -f "details_url=${RUN_URL}" \
-            && echo "Check details_url set to ${RUN_URL}" \
-            || echo "Failed to set check details_url (non-fatal)"
+          # Use curl instead of `gh` — self-hosted riven-runner doesn't have
+          # the gh CLI installed; curl is always available.
+          HTTP_CODE=$(curl -sS -o /tmp/details.resp -w "%{http_code}" \
+            -X PATCH \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
+            -d "$(printf '{"details_url":"%s"}' "${RUN_URL}")")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed to set check details_url (HTTP ${HTTP_CODE}):"
+            cat /tmp/details.resp
+            exit 1
+          fi
+          echo "Check details_url set to ${RUN_URL}"
 
       - uses: actions/checkout@v5
         with:
@@ -408,6 +418,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.target-token.outputs.token }}
         run: |
+          set -euo pipefail
           TARGET="${{ inputs.target_repo }}"
           if [ -z "$TARGET" ] || ! echo "$TARGET" | grep -q '/'; then
             echo "No valid target_repo — skipping check run update"
@@ -416,14 +427,30 @@ jobs:
           REPO_OWNER="${TARGET%%/*}"
           REPO_NAME="${TARGET##*/}"
           CONCLUSION="${{ job.status == 'success' && 'success' || 'failure' }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          gh api \
-            --method PATCH \
-            "/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
-            -f status=completed \
-            -f "conclusion=${CONCLUSION}" \
-            -f "completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -f "output[title]=CI ${CONCLUSION}" \
-            -f "output[summary]=[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
-            && echo "Check run updated on ${TARGET}" \
-            || echo "Failed to update check run (non-fatal)"
+          # Build JSON payload via jq to escape reliably.
+          PAYLOAD=$(jq -n \
+            --arg status "completed" \
+            --arg conclusion "$CONCLUSION" \
+            --arg completed_at "$COMPLETED_AT" \
+            --arg title "CI $CONCLUSION" \
+            --arg summary "[View run](${RUN_URL})" \
+            '{status: $status, conclusion: $conclusion, completed_at: $completed_at, output: {title: $title, summary: $summary}}')
+
+          # curl instead of `gh` — self-hosted riven-runner lacks the gh CLI.
+          HTTP_CODE=$(curl -sS -o /tmp/check.resp -w "%{http_code}" \
+            -X PATCH \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/check-runs/${{ inputs.check_run_id }}" \
+            -d "$PAYLOAD")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed to update check run (HTTP ${HTTP_CODE}):"
+            cat /tmp/check.resp
+            exit 1
+          fi
+          echo "Check run updated on ${TARGET}"
